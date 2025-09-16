@@ -302,3 +302,162 @@ app.listen(PORT, () => {
     console.log(`🧪 Test your credentials at: http://localhost:${PORT}/api/espn/test`);
   }
 });
+
+app.post("/api/espn/projections", async (req, res) => {
+  try {
+    const { season = 2025, playerIds, pprId = 0 } = req.body;
+    
+    if (!playerIds || !Array.isArray(playerIds)) {
+      return res.status(400).json({ error: "playerIds array is required" });
+    }
+    
+    const filter = {
+      players: {
+        filterIds: { value: playerIds },
+        filterStatsForTopScoringPeriodIds: {
+          value: 2,
+          additionalValue: [`00${season}`, `10${season}`]
+        }
+      }
+    };
+    
+    const url = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leaguedefaults/${pprId}?view=kona_player_info`;
+    console.log(`Fetching projections for ${playerIds.length} players`);
+    
+    const data = await espnFetch(url, { filter });
+    
+    // Transform the data to be more useful
+    const projections = data.players?.map(player => ({
+      id: player.id,
+      name: player.fullName,
+      position: player.defaultPositionId,
+      team: player.proTeamAbbreviation,
+      seasonProjection: player.stats?.find(s => s.scoringPeriodId === 0)?.appliedTotal || 0,
+      weeklyProjections: player.stats?.filter(s => s.scoringPeriodId > 0 && s.scoringPeriodId <= 18)?.map(week => ({
+        week: week.scoringPeriodId,
+        projectedPoints: week.appliedTotal || 0,
+        breakdown: week.stats || {}
+      })) || [],
+      averageProjection: player.stats?.find(s => s.scoringPeriodId === 0)?.appliedAverage || 0,
+      ownership: player.ownership || { percentOwned: 0 }
+    })) || [];
+    
+    res.json({ 
+      success: true,
+      projections,
+      playersFound: projections.length,
+      season 
+    });
+  } catch (e) {
+    console.error("Projections fetch error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Advanced waiver analysis endpoint
+app.post("/api/espn/waiver-analysis", async (req, res) => {
+  try {
+    const { season = 2025, position = 'RB', leagueId, currentPlayerIds = [] } = req.body;
+    
+    // Map position to ESPN slot ID
+    const positionMap = { QB: 0, RB: 2, WR: 4, TE: 6, 'D/ST': 16, K: 17 };
+    const slotId = positionMap[position] || 2;
+    
+    // Get free agents
+    const filter = {
+      players: {
+        filterStatus: { value: ["FREEAGENT", "WAIVERS"] },
+        filterSlotIds: { value: [slotId] },
+        sortPercOwned: { sortPriority: 1, sortAsc: false },
+        limit: 50,
+        offset: 0
+      }
+    };
+    
+    console.log(`Analyzing waiver options for ${position} position`);
+    
+    const freeAgentsData = await espnFetch(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/players?view=players_wl`, { filter });
+    const freeAgents = freeAgentsData.players || freeAgentsData || [];
+    
+    // Get projections for top free agents
+    const topFAIds = freeAgents.slice(0, 10).map(p => p.id);
+    const allPlayerIds = [...currentPlayerIds, ...topFAIds];
+    
+    let projections = [];
+    if (allPlayerIds.length > 0) {
+      try {
+        const projData = await espnFetch(`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leaguedefaults/0?view=kona_player_info`, {
+          filter: {
+            players: {
+              filterIds: { value: allPlayerIds },
+              filterStatsForTopScoringPeriodIds: {
+                value: 2,
+                additionalValue: [`00${season}`, `10${season}`]
+              }
+            }
+          }
+        });
+        projections = projData.players || [];
+      } catch (projError) {
+        console.log("Projections unavailable:", projError.message);
+      }
+    }
+    
+    // Combine free agent data with projections
+    const analysis = freeAgents.map(fa => {
+      const projection = projections.find(p => p.id === fa.id);
+      const seasonProjection = projection?.stats?.find(s => s.scoringPeriodId === 0)?.appliedTotal || 0;
+      const avgProjection = projection?.stats?.find(s => s.scoringPeriodId === 0)?.appliedAverage || 0;
+      
+      let priority = 'LOW';
+      let reasoning = 'Depth option';
+      
+      if (fa.ownership?.percentOwned > 70) {
+        priority = 'HIGH';
+        reasoning = 'Widely owned, likely starter';
+      } else if (fa.ownership?.percentOwned > 40) {
+        priority = 'MEDIUM';
+        reasoning = 'Solid roster option';
+      } else if (seasonProjection > 150) {
+        priority = 'HIGH';
+        reasoning = 'Strong projection despite low ownership';
+      }
+      
+      return {
+        id: fa.id,
+        name: fa.fullName,
+        position: fa.defaultPositionId,
+        team: fa.proTeamAbbreviation,
+        ownershipPct: fa.ownership?.percentOwned || 0,
+        seasonProjection,
+        avgProjection,
+        priority,
+        reasoning,
+        faabBid: priority === 'HIGH' ? '$25-40' : priority === 'MEDIUM' ? '$10-20' : '$1-5'
+      };
+    });
+    
+    // Sort by priority and projection
+    const priorityOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+    analysis.sort((a, b) => {
+      const priorityDiff = priorityOrder[b.priority] - priorityOrder[a.priority];
+      if (priorityDiff !== 0) return priorityDiff;
+      return b.seasonProjection - a.seasonProjection;
+    });
+    
+    res.json({
+      success: true,
+      position,
+      analysis: analysis.slice(0, 15),
+      summary: {
+        highPriority: analysis.filter(p => p.priority === 'HIGH').length,
+        mediumPriority: analysis.filter(p => p.priority === 'MEDIUM').length,
+        totalAnalyzed: analysis.length
+      }
+    });
+    
+  } catch (e) {
+    console.error("Waiver analysis error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
