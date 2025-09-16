@@ -1,9 +1,12 @@
 {
-  "name": "fantasy-scripts",
+  "name": "fantasy-helper-scripts",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "ingest": "node ingestPlayers.js"
+  },
   "dependencies": {
-    "dotenv": "^17.2.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.0.3"
   }
 }
