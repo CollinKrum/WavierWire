@@ -1,186 +1,213 @@
-import 'dotenv/config';
 import fetch from 'node-fetch';
+import 'dotenv/config';
 
-const API_BASE = process.env.API_BASE_URL || 'http://localhost:8081';
-const SEASON = 2025;
+const API_BASE_URL = process.env.API_BASE_URL || 'https://wavierwire.onrender.com';
 
-// Position mappings
-const POSITION_SLOTS = [
-  { id: 0, name: 'QB', limit: 50 },
-  { id: 2, name: 'RB', limit: 100 },
-  { id: 4, name: 'WR', limit: 150 },
-  { id: 6, name: 'TE', limit: 50 },
-  { id: 16, name: 'D/ST', limit: 32 },
-  { id: 17, name: 'K', limit: 32 }
-];
+// NFL team mapping for bye weeks
+const NFL_TEAMS = {
+  1: { abbrev: 'ATL', bye: 12 },
+  2: { abbrev: 'BUF', bye: 12 },
+  3: { abbrev: 'CHI', bye: 7 },
+  4: { abbrev: 'CIN', bye: 12 },
+  5: { abbrev: 'CLE', bye: 10 },
+  6: { abbrev: 'DAL', bye: 7 },
+  7: { abbrev: 'DEN', bye: 14 },
+  8: { abbrev: 'DET', bye: 5 },
+  9: { abbrev: 'GB', bye: 10 },
+  10: { abbrev: 'TEN', bye: 5 },
+  11: { abbrev: 'IND', bye: 14 },
+  12: { abbrev: 'KC', bye: 6 },
+  13: { abbrev: 'LV', bye: 10 },
+  14: { abbrev: 'LAR', bye: 6 },
+  15: { abbrev: 'MIA', bye: 6 },
+  16: { abbrev: 'MIN', bye: 6 },
+  17: { abbrev: 'NE', bye: 14 },
+  18: { abbrev: 'NO', bye: 12 },
+  19: { abbrev: 'NYG', bye: 11 },
+  20: { abbrev: 'NYJ', bye: 12 },
+  21: { abbrev: 'PHI', bye: 5 },
+  22: { abbrev: 'ARI', bye: 11 },
+  23: { abbrev: 'PIT', bye: 9 },
+  24: { abbrev: 'LAC', bye: 5 },
+  25: { abbrev: 'SF', bye: 9 },
+  26: { abbrev: 'SEA', bye: 10 },
+  27: { abbrev: 'TB', bye: 11 },
+  28: { abbrev: 'WAS', bye: 14 },
+  29: { abbrev: 'CAR', bye: 11 },
+  30: { abbrev: 'JAX', bye: 9 },
+  33: { abbrev: 'BAL', bye: 14 },
+  34: { abbrev: 'HOU', bye: 9 }
+};
 
-async function fetchPlayersFromESPN(positionSlot, limit = 100) {
-  console.log(`🔍 Fetching ${positionSlot.name} players...`);
+// Position slot mapping
+const POSITION_SLOTS = {
+  0: 'QB',
+  2: 'RB', 
+  4: 'WR',
+  6: 'TE',
+  16: 'D/ST',
+  17: 'K'
+};
+
+const INJURY_STATUS = {
+  0: 'ACTIVE',
+  1: 'BEREAVEMENT',
+  2: 'DAY_TO_DAY',
+  3: 'DOUBTFUL',
+  4: 'FIFTEEN_DAY_DL',
+  5: 'INJURY_RESERVE',
+  6: 'OUT',
+  7: 'PHYSICALLY_UNABLE_TO_PERFORM',
+  8: 'PROBABLE',
+  9: 'QUESTIONABLE',
+  10: 'SEVEN_DAY_DL',
+  11: 'SIXTY_DAY_DL',
+  12: 'SUSPENSION',
+  13: 'TEN_DAY_DL',
+  14: 'WAIVERS'
+};
+
+async function fetchPlayersFromESPN(position) {
+  console.log(`Fetching ${POSITION_SLOTS[position]} players...`);
   
   const filter = {
     players: {
-      filterSlotIds: { value: [positionSlot.id] },
-      sortPercOwned: { sortPriority: 1, sortAsc: false },
-      limit,
-      offset: 0
+      filterSlotIds: {
+        value: [position]
+      },
+      limit: 1000,
+      sortPercOwned: {
+        sortAsc: false,
+        sortPriority: 1
+      }
     }
   };
 
   try {
-    const response = await fetch(`${API_BASE}/api/espn/players`, {
+    const response = await fetch(`${API_BASE_URL}/api/espn/players`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ season: SEASON, filter })
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        season: 2024,
+        filter: filter
+      })
     });
 
     if (!response.ok) {
-      throw new Error(`ESPN API failed: ${response.status}`);
+      throw new Error(`ESPN API error: ${response.status}`);
     }
 
     const data = await response.json();
-    const players = data.players || data || [];
-    
-    console.log(`✅ Found ${players.length} ${positionSlot.name} players`);
-    
-    return players.map(player => ({
-      espn_id: player.id,
-      name: player.fullName || player.name,
-      position: positionSlot.name,
-      team: player.proTeamAbbreviation || 'FA',
-      bye_week: null, // Will be updated separately
-      status: 'active'
-    }));
+    return data.players || [];
   } catch (error) {
-    console.error(`❌ Error fetching ${positionSlot.name}:`, error.message);
+    console.error(`Error fetching ${POSITION_SLOTS[position]} players:`, error.message);
     return [];
   }
 }
 
-async function fetchByeWeeks() {
-  console.log('📅 Fetching bye weeks...');
-  
-  try {
-    const response = await fetch(`${API_BASE}/api/espn/byeWeeks?season=${SEASON}`);
-    if (!response.ok) return {};
-    
-    const data = await response.json();
-    const byeWeeks = {};
-    
-    if (data.settings?.proTeams) {
-      data.settings.proTeams.forEach(team => {
-        if (team.byeWeek && team.abbrev) {
-          byeWeeks[team.abbrev] = team.byeWeek;
-        }
-      });
-    }
-    
-    console.log(`✅ Found bye weeks for ${Object.keys(byeWeeks).length} teams`);
-    return byeWeeks;
-  } catch (error) {
-    console.error('❌ Error fetching bye weeks:', error.message);
-    return {};
-  }
+function processPlayer(player) {
+  const name = `${player.player?.firstName || ''} ${player.player?.lastName || ''}`.trim();
+  const position = POSITION_SLOTS[player.player?.defaultPositionId] || 'UNKNOWN';
+  const teamInfo = NFL_TEAMS[player.player?.proTeamId];
+  const team = teamInfo?.abbrev || 'FA';
+  const bye_week = teamInfo?.bye || null;
+  const status = INJURY_STATUS[player.player?.injuryStatus] || 'ACTIVE';
+
+  return {
+    espn_id: player.player?.id,
+    name: name,
+    position: position,
+    team: team,
+    bye_week: bye_week,
+    status: status
+  };
 }
 
-async function upsertPlayers(players) {
-  if (players.length === 0) return;
-  
-  console.log(`💾 Upserting ${players.length} players...`);
-  
+async function uploadPlayersBatch(players) {
   try {
-    const response = await fetch(`${API_BASE}/api/players/upsert`, {
+    const response = await fetch(`${API_BASE_URL}/api/players/bulk`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ players })
     });
 
     if (!response.ok) {
-      throw new Error(`Upsert failed: ${response.status}`);
+      throw new Error(`Upload error: ${response.status}`);
     }
 
     const result = await response.json();
-    console.log(`✅ Upserted ${result.upserted || players.length} players`);
+    return result;
   } catch (error) {
-    console.error('❌ Error upserting players:', error.message);
+    console.error('Error uploading players:', error.message);
+    throw error;
   }
 }
 
-function chunkArray(array, size) {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
-}
-
-async function main() {
-  console.log('🏈 Starting NFL Player Ingestion...\n');
+async function ingestAllPlayers() {
+  console.log('🏈 Starting NFL player ingestion...');
+  console.log(`API Base URL: ${API_BASE_URL}`);
   
-  // First, get bye weeks
-  const byeWeeks = await fetchByeWeeks();
-  
-  let allPlayers = [];
+  const allPlayers = [];
+  const positions = [0, 2, 4, 6, 16, 17]; // QB, RB, WR, TE, D/ST, K
   
   // Fetch players for each position
-  for (const position of POSITION_SLOTS) {
-    const players = await fetchPlayersFromESPN(position, position.limit);
+  for (const position of positions) {
+    const players = await fetchPlayersFromESPN(position);
+    console.log(`Found ${players.length} ${POSITION_SLOTS[position]} players`);
     
-    // Add bye weeks to players
-    players.forEach(player => {
-      if (byeWeeks[player.team]) {
-        player.bye_week = byeWeeks[player.team];
-      }
-    });
+    const processedPlayers = players
+      .filter(p => p.player?.id && p.player?.firstName && p.player?.lastName)
+      .map(processPlayer);
     
-    allPlayers = allPlayers.concat(players);
+    allPlayers.push(...processedPlayers);
     
     // Small delay to be nice to ESPN's API
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
+
+  console.log(`\n📊 Total players to upload: ${allPlayers.length}`);
   
-  console.log(`\n📊 Total players found: ${allPlayers.length}`);
+  // Upload in batches of 50
+  const batchSize = 50;
+  let totalUploaded = 0;
   
-  // Remove duplicates (some players might appear in multiple positions)
-  const uniquePlayers = allPlayers.reduce((acc, player) => {
-    const existing = acc.find(p => p.espn_id === player.espn_id);
-    if (!existing) {
-      acc.push(player);
-    } else {
-      // Keep the first position we found
-      console.log(`🔄 Duplicate found: ${player.name} (${player.position})`);
+  for (let i = 0; i < allPlayers.length; i += batchSize) {
+    const batch = allPlayers.slice(i, i + batchSize);
+    
+    try {
+      const result = await uploadPlayersBatch(batch);
+      totalUploaded += result.inserted;
+      console.log(`✅ Uploaded batch ${Math.floor(i/batchSize) + 1}: ${result.inserted} players`);
+    } catch (error) {
+      console.error(`❌ Failed to upload batch ${Math.floor(i/batchSize) + 1}:`, error.message);
     }
-    return acc;
-  }, []);
-  
-  console.log(`📊 Unique players: ${uniquePlayers.length}`);
-  
-  // Upsert in batches to avoid overwhelming the database
-  const batches = chunkArray(uniquePlayers, 50);
-  console.log(`\n📦 Processing ${batches.length} batches...`);
-  
-  for (let i = 0; i < batches.length; i++) {
-    console.log(`\n📦 Batch ${i + 1}/${batches.length}`);
-    await upsertPlayers(batches[i]);
     
     // Small delay between batches
-    if (i < batches.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
+
+  console.log(`\n🎉 Ingestion complete! Total players uploaded: ${totalUploaded}`);
   
-  console.log('\n🎉 Player ingestion complete!');
-  console.log(`✅ Total players processed: ${uniquePlayers.length}`);
-  
-  // Summary by position
-  console.log('\n📊 Players by position:');
-  POSITION_SLOTS.forEach(pos => {
-    const count = uniquePlayers.filter(p => p.position === pos.name).length;
-    console.log(`   ${pos.name}: ${count} players`);
-  });
+  // Test the database
+  console.log('\n🔍 Testing database...');
+  try {
+    const testResponse = await fetch(`${API_BASE_URL}/api/players?limit=5`);
+    const testPlayers = await testResponse.json();
+    console.log('Sample players in database:');
+    testPlayers.forEach(p => {
+      console.log(`  - ${p.name} (${p.position}, ${p.team})`);
+    });
+  } catch (error) {
+    console.error('Error testing database:', error.message);
+  }
 }
 
 // Run the ingestion
-main().catch(error => {
-  console.error('💥 Ingestion failed:', error);
+ingestAllPlayers().catch(error => {
+  console.error('Fatal error:', error);
   process.exit(1);
 });
