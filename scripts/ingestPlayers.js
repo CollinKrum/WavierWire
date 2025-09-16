@@ -1,7 +1,7 @@
 import fetch from 'node-fetch';
 import 'dotenv/config';
 
-const API_BASE_URL = process.env.API_BASE_URL || 'https://wavierwire.onrender.com';
+const API_BASE_URL = 'https://wavierwire.onrender.com';
 
 // NFL team mapping for bye weeks
 const NFL_TEAMS = {
