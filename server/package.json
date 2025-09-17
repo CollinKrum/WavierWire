@@ -5,7 +5,8 @@
   "scripts": {
     "prebuild": "apt-get update && apt-get install -y python3 python3-pip && pip3 install espn-api || echo 'Python install failed - will continue anyway'",
     "build": "npm install",
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
