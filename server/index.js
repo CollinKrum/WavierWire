@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
@@ -20,19 +21,54 @@ if (!DATABASE_URL) {
   console.warn("[WARN] Missing DATABASE_URL env var. Set it in your host.");
 }
 
-// Database connection
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+// Database connection with proper error handling
+let pool = null;
 
-// Test database connection
-pool.on('connect', () => {
-  console.log('Connected to the database');
-});
+if (DATABASE_URL) {
+  try {
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      connectionTimeoutMillis: 5000,
+      idleTimeoutMillis: 30000,
+      max: 10
+    });
 
-pool.on('error', (err) => {
-  console.error('Database connection error:', err);
+    pool.on('connect', () => {
+      console.log('Connected to the database');
+    });
+
+    pool.on('error', (err) => {
+      console.error('Database connection error:', err);
+    });
+
+    // Test initial connection
+    pool.query('SELECT NOW()').then(() => {
+      console.log('Database connection successful');
+    }).catch(err => {
+      console.error('Initial database connection failed:', err);
+    });
+
+  } catch (error) {
+    console.error('Failed to create database pool:', error);
+    pool = null;
+  }
+} else {
+  console.warn('[WARN] DATABASE_URL not provided. Database features will be disabled.');
+}
+
+// Helper function to safely execute queries
+async function safeQuery(text, params = []) {
+  if (!pool) {
+    throw new Error('Database not available');
+  }
+  return await pool.query(text, params);
+}
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
 });
 
 async function espnFetch(url, init = {}) {
@@ -279,21 +315,52 @@ function formatPlayerName(player) {
   return combined || player.displayName || 'Unknown Player';
 }
 
+// Root endpoint
+app.get("/", (req, res) => {
+  res.json({ 
+    message: "Fantasy Helper API", 
+    status: "running",
+    endpoints: [
+      "GET /api/health",
+      "GET /api/roster", 
+      "GET /api/watchlist",
+      "GET /api/players",
+      "POST /api/espn/players",
+      "GET /api/espn/test"
+    ]
+  });
+});
+
+// API root
+app.get("/api", (req, res) => {
+  res.json({ 
+    message: "Fantasy Helper API v1.0",
+    status: "ok" 
+  });
+});
+
 // Health check endpoint
 app.get("/api/health", async (req, res) => {
   try {
-    // Test database connection
-    const dbResult = await pool.query('SELECT NOW()');
+    let dbStatus = 'disconnected';
+    let dbTime = null;
+    
+    if (pool) {
+      const dbResult = await safeQuery('SELECT NOW()');
+      dbStatus = 'connected';
+      dbTime = dbResult.rows[0].now;
+    }
+    
     res.json({ 
       status: 'ok', 
-      database: 'connected',
-      timestamp: dbResult.rows[0].now,
+      database: dbStatus,
+      timestamp: dbTime,
       espn_auth: !!(SWID && ESPN_S2)
     });
   } catch (error) {
     res.status(500).json({ 
       status: 'error', 
-      database: 'disconnected',
+      database: 'error',
       error: error.message 
     });
   }
@@ -326,15 +393,26 @@ app.post("/admin/migrate", async (req, res) => {
       );
     `;
 
+    const createRosterTable = `
+      CREATE TABLE IF NOT EXISTS my_roster (
+        id SERIAL PRIMARY KEY,
+        player_id INTEGER REFERENCES players(id) ON DELETE CASCADE,
+        position_slot VARCHAR(20) NOT NULL,
+        added_date TIMESTAMP DEFAULT NOW(),
+        notes TEXT
+      );
+    `;
+
     const createIndexes = `
       CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
       CREATE INDEX IF NOT EXISTS idx_players_position ON players(position);
       CREATE INDEX IF NOT EXISTS idx_players_team ON players(team);
     `;
 
-    await pool.query(createPlayersTable);
-    await pool.query(createWatchlistTable);
-    await pool.query(createIndexes);
+    await safeQuery(createPlayersTable);
+    await safeQuery(createWatchlistTable);
+    await safeQuery(createRosterTable);
+    await safeQuery(createIndexes);
 
     console.log('Database migration completed successfully');
     res.json({ ok: true, message: 'Migration completed' });
@@ -348,6 +426,10 @@ app.post("/admin/migrate", async (req, res) => {
 app.get("/api/players", async (req, res) => {
   try {
     const { position, team, limit = 50 } = req.query;
+    
+    if (!pool) {
+      return res.json({ players: [], message: 'Database not available' });
+    }
     
     let query = 'SELECT * FROM players WHERE 1=1';
     const params = [];
@@ -368,7 +450,7 @@ app.get("/api/players", async (req, res) => {
     query += ` ORDER BY name LIMIT $${paramIndex}`;
     params.push(parseInt(limit));
 
-    const result = await pool.query(query, params);
+    const result = await safeQuery(query, params);
     res.json({ players: result.rows });
   } catch (error) {
     console.error('Error fetching players:', error);
@@ -379,6 +461,10 @@ app.get("/api/players", async (req, res) => {
 // Add or update a player
 app.post("/api/players", async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
     const { espn_id, name, position, team, bye_week, status } = req.body;
 
     const query = `
@@ -395,7 +481,7 @@ app.post("/api/players", async (req, res) => {
       RETURNING *;
     `;
 
-    const result = await pool.query(query, [espn_id, name, position, team, bye_week, status]);
+    const result = await safeQuery(query, [espn_id, name, position, team, bye_week, status]);
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Error adding/updating player:', error);
@@ -405,53 +491,52 @@ app.post("/api/players", async (req, res) => {
 
 // Manage saved roster
 app.get("/api/roster", async (_req, res) => {
-  const viewQuery = 'SELECT * FROM v_my_roster ORDER BY position_slot';
+  if (!pool) {
+    return res.json({ roster: [], message: 'Database not available' });
+  }
+
   try {
-    const { rows } = await pool.query(viewQuery);
+    // Try the view first
+    let { rows } = await safeQuery('SELECT * FROM v_my_roster ORDER BY position_slot');
     return res.json({ roster: rows });
   } catch (error) {
     if (error?.code === '42P01') {
-      console.warn('[WARN] v_my_roster view missing, using fallback query');
-      const fallbackQuery = `
-        SELECT
-          r.id,
-          r.position_slot,
-          r.added_date,
-          r.notes AS roster_notes,
-          p.id AS player_id,
-          p.espn_id,
-          p.name,
-          p.position,
-          p.team,
-          p.bye_week,
-          p.status
-        FROM my_roster r
-        JOIN players p ON p.id = r.player_id
-        ORDER BY
-          CASE r.position_slot
-            WHEN 'QB' THEN 1
-            WHEN 'RB' THEN 2
-            WHEN 'WR' THEN 3
-            WHEN 'TE' THEN 4
-            WHEN 'FLEX' THEN 5
-            WHEN 'D/ST' THEN 6
-            WHEN 'K' THEN 7
-            WHEN 'BENCH' THEN 8
-            ELSE 9
-          END;
-      `;
-
+      console.warn('[WARN] v_my_roster view missing, trying fallback');
+      
       try {
-        const { rows } = await pool.query(fallbackQuery);
+        // Try the base table
+        const { rows } = await safeQuery(`
+          SELECT
+            r.id,
+            r.position_slot,
+            r.added_date,
+            r.notes AS roster_notes,
+            p.id AS player_id,
+            p.espn_id,
+            p.name,
+            p.position,
+            p.team,
+            p.bye_week,
+            p.status
+          FROM my_roster r
+          JOIN players p ON p.id = r.player_id
+          ORDER BY
+            CASE r.position_slot
+              WHEN 'QB' THEN 1
+              WHEN 'RB' THEN 2
+              WHEN 'WR' THEN 3
+              WHEN 'TE' THEN 4
+              WHEN 'FLEX' THEN 5
+              WHEN 'D/ST' THEN 6
+              WHEN 'K' THEN 7
+              WHEN 'BENCH' THEN 8
+              ELSE 9
+            END;
+        `);
         return res.json({ roster: rows });
       } catch (fallbackError) {
-        if (fallbackError?.code === '42P01') {
-          console.warn('[WARN] Roster tables missing, returning empty roster');
-          return res.json({ roster: [] });
-        }
-
-        console.error('Error fetching roster via fallback:', fallbackError);
-        return res.status(500).json({ error: fallbackError.message });
+        console.warn('[WARN] Roster tables missing, returning empty roster');
+        return res.json({ roster: [], message: 'Roster tables not created yet' });
       }
     }
 
@@ -462,12 +547,16 @@ app.get("/api/roster", async (_req, res) => {
 
 app.post("/api/roster", async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
     const { player_id, position_slot } = req.body || {};
     if (player_id == null || position_slot == null) {
       return res.status(400).json({ error: 'player_id, position_slot required' });
     }
 
-    const { rows } = await pool.query(
+    const { rows } = await safeQuery(
       'INSERT INTO my_roster (player_id, position_slot) VALUES ($1, $2) RETURNING *',
       [player_id, position_slot]
     );
@@ -481,7 +570,11 @@ app.post("/api/roster", async (req, res) => {
 
 app.delete("/api/roster/:id", async (req, res) => {
   try {
-    await pool.query('DELETE FROM my_roster WHERE id = $1', [req.params.id]);
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    await safeQuery('DELETE FROM my_roster WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
   } catch (error) {
     console.error('Error deleting roster item:', error);
@@ -490,13 +583,21 @@ app.delete("/api/roster/:id", async (req, res) => {
 });
 
 // Manage watchlist
-app.get("/api/watchlist", async (_req, res) => {
+app.get("/api/watchlist", async (req, res) => {
+  if (!pool) {
+    return res.json({ watchlist: [], message: 'Database not available' });
+  }
+
   try {
-    const { rows } = await pool.query(
-      'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY added_date DESC'
+    const { rows } = await safeQuery(
+      'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY created_at DESC'
     );
     res.json({ watchlist: rows });
   } catch (error) {
+    if (error?.code === '42P01') {
+      console.warn('[WARN] Watchlist table missing');
+      return res.json({ watchlist: [], message: 'Watchlist table not created yet' });
+    }
     console.error('Error fetching watchlist:', error);
     res.status(500).json({ error: error.message });
   }
@@ -504,13 +605,17 @@ app.get("/api/watchlist", async (_req, res) => {
 
 app.post("/api/watchlist", async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
     const { player_id, interest_level = 3, notes } = req.body || {};
     if (player_id == null) {
       return res.status(400).json({ error: 'player_id required' });
     }
 
-    const { rows } = await pool.query(
-      'INSERT INTO watchlist (player_id, interest_level, notes) VALUES ($1, $2, $3) ON CONFLICT (player_id) DO UPDATE SET interest_level = EXCLUDED.interest_level, notes = EXCLUDED.notes RETURNING *',
+    const { rows } = await safeQuery(
+      'INSERT INTO watchlist (player_id, priority, notes) VALUES ($1, $2, $3) ON CONFLICT (player_id) DO UPDATE SET priority = EXCLUDED.priority, notes = EXCLUDED.notes RETURNING *',
       [player_id, interest_level, notes ?? null]
     );
 
@@ -523,7 +628,11 @@ app.post("/api/watchlist", async (req, res) => {
 
 app.delete("/api/watchlist/:id", async (req, res) => {
   try {
-    await pool.query('DELETE FROM watchlist WHERE id = $1', [req.params.id]);
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    await safeQuery('DELETE FROM watchlist WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
   } catch (error) {
     console.error('Error deleting watchlist item:', error);
@@ -534,6 +643,10 @@ app.delete("/api/watchlist/:id", async (req, res) => {
 // Bulk player upsert (ingester)
 app.post("/api/players/upsert", async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
     const { players } = req.body || {};
     if (!Array.isArray(players) || players.length === 0) {
       return res.status(400).json({ error: 'players[] required' });
@@ -564,7 +677,7 @@ app.post("/api/players/upsert", async (req, res) => {
         updated_at = NOW();
     `;
 
-    await pool.query(sql, params);
+    await safeQuery(sql, params);
     res.json({ ok: true, upserted: players.length });
   } catch (error) {
     console.error('Error upserting players:', error);
@@ -572,63 +685,13 @@ app.post("/api/players/upsert", async (req, res) => {
   }
 });
 
-// Player news endpoints
-app.get("/api/news", async (req, res) => {
-  try {
-    const playerIdRaw = req.query.player_id;
-    const playerId = Array.isArray(playerIdRaw) ? playerIdRaw[0] : playerIdRaw;
-
-    const params = [];
-    let sql = 'SELECT * FROM player_news';
-    if (playerId) {
-      params.push(playerId);
-      sql += ` WHERE player_id = $${params.length}`;
-    }
-    sql += ' ORDER BY published_date DESC LIMIT 200';
-
-    const { rows } = await pool.query(sql, params);
-    res.json({ news: rows });
-  } catch (error) {
-    console.error('Error fetching news:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post("/api/news/bulk", async (req, res) => {
-  try {
-    const { items } = req.body || {};
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'items[] required' });
-    }
-
-    const valuesSql = items
-      .map((_item, index) => `($${index * 5 + 1}, $${index * 5 + 2}, $${index * 5 + 3}, $${index * 5 + 4}, $${index * 5 + 5})`)
-      .join(',');
-
-    const params = items.flatMap((item) => [
-      item.player_id,
-      item.headline,
-      item.content ?? null,
-      item.source ?? 'misc',
-      item.published_date ?? new Date()
-    ]);
-
-    const sql = `
-      INSERT INTO player_news (player_id, headline, content, source, published_date)
-      VALUES ${valuesSql}
-    `;
-
-    await pool.query(sql, params);
-    res.json({ ok: true, inserted: items.length });
-  } catch (error) {
-    console.error('Error inserting news items:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Bulk upsert players
 app.post("/api/players/bulk", async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
     const { players } = req.body;
 
     if (!Array.isArray(players) || players.length === 0) {
@@ -673,24 +736,12 @@ app.post("/api/players/bulk", async (req, res) => {
   }
 });
 
-// ESPN API endpoints (your existing ones)
+// ESPN API endpoints
 app.get("/api/espn/league", async (req, res) => {
   try {
     const { season, leagueId, view } = req.query;
     const v = view || "mTeam,mRoster,mSettings,mNav";
     const url = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=${encodeURIComponent(v)}`;
-    const data = await espnFetch(url);
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/espn/leagueHistory", async (req, res) => {
-  try {
-    const { season, leagueId, view } = req.query;
-    const v = view || "mTeam,mRoster,mSettings";
-    const url = `https://fantasy.espn.com/apis/v3/games/ffl/leagueHistory/${leagueId}?seasonId=${season}&view=${encodeURIComponent(v)}`;
     const data = await espnFetch(url);
     res.json(data);
   } catch (e) {
@@ -736,14 +787,16 @@ app.post("/api/espn/waiver-analysis", async (req, res) => {
 
   let rosterPlayers = [];
   try {
-    const rosterQuery = `
-      SELECT p.espn_id, p.name, p.position, p.team, r.position_slot
-      FROM my_roster r
-      JOIN players p ON p.id = r.player_id
-      WHERE ($1 = 'ALL') OR p.position = $1 OR r.position_slot = $1
-    `;
-    const rosterResult = await pool.query(rosterQuery, [position]);
-    rosterPlayers = rosterResult.rows || [];
+    if (pool) {
+      const rosterQuery = `
+        SELECT p.espn_id, p.name, p.position, p.team, r.position_slot
+        FROM my_roster r
+        JOIN players p ON p.id = r.player_id
+        WHERE ($1 = 'ALL') OR p.position = $1 OR r.position_slot = $1
+      `;
+      const rosterResult = await safeQuery(rosterQuery, [position]);
+      rosterPlayers = rosterResult.rows || [];
+    }
   } catch (dbError) {
     if (dbError?.code === '42P01' || dbError?.code === 'ECONNREFUSED') {
       console.warn('[WARN] Roster lookup unavailable for waiver analysis:', dbError.message);
@@ -877,7 +930,66 @@ app.get("/api/espn/test", async (req, res) => {
   }
 });
 
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  
+  // Don't expose error details in production
+  const isDevelopment = process.env.NODE_ENV === 'development';
+  
+  res.status(500).json({
+    error: isDevelopment ? err.message : 'Internal server error',
+    path: req.path,
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Handle 404s
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    path: req.path,
+    method: req.method,
+    availableEndpoints: [
+      'GET /',
+      'GET /api',
+      'GET /api/health',
+      'GET /api/espn/test', 
+      'POST /api/espn/players',
+      'GET /api/roster',
+      'GET /api/watchlist',
+      'GET /api/players',
+      'POST /admin/migrate'
+    ]
+  });
+});
+
+// Add process error handlers
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
 const PORT = process.env.PORT || 8081;
 app.listen(PORT, () => {
   console.log(`Fantasy proxy running on ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/api/health`);
+  console.log(`ESPN test: http://localhost:${PORT}/api/espn/test`);
+}); e.message });
+  }
 });
+
+app.get("/api/espn/leagueHistory", async (req, res) => {
+  try {
+    const { season, leagueId, view } = req.query;
+    const v = view || "mTeam,mRoster,mSettings";
+    const url = `https://fantasy.espn.com/apis/v3/games/ffl/leagueHistory/${leagueId}?seasonId=${season}&view=${encodeURIComponent(v)}`;
+    const data = await espnFetch(url);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error:
