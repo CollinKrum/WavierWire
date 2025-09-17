@@ -1,54 +1,29 @@
-name: Deploy Fantasy Helper
-
-on:
-  push:
-    branches: [ main, production ]
-  workflow_dispatch:
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: Production
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+services:
+  - type: web
+    name: wavierwire
+    env: node
+    buildCommand: |
+      # Install R
+      apt-get update
+      apt-get install -y r-base
       
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-        
-    - name: Clean install server dependencies
-      run: |
-        cd server
-        rm -f package-lock.json
-        npm install
-        
-    - name: Test server startup
-      run: |
-        cd server
-        timeout 10s npm start || true
-      env:
-        SWID: ${{ secrets.SWID }}
-        ESPN_S2: ${{ secrets.ESPN_S2 }}
-        DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        NODE_ENV: production
-        
-    - name: Install client dependencies
-      run: |
-        cd client
-        npm ci || npm install
-        
-    - name: Build client
-      run: |
-        cd client
-        npm run build
-      env:
-        VITE_API_BASE: https://wavierwire.onrender.com
-        
-    - name: Deploy notification
-      run: |
-        echo "✅ Build successful!"
-        echo "Server dependencies installed"
-        echo "Client built successfully"
+      # Install R packages
+      R -e "install.packages(c('ffscrapr', 'jsonlite', 'dplyr'), repos='http://cran.r-project.org')"
+      
+      # Install Node dependencies
+      npm install
+      
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SWID
+        fromService:
+          type: web
+          name: wavierwire
+          property: SWID
+      - key: ESPN_S2
+        fromService:
+          type: web
+          name: wavierwire
+          property: ESPN_S2
