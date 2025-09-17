@@ -178,30 +178,44 @@ app.get("/api/health", async (req, res) => {
 // Database migration endpoint
 // Replace the migration endpoint in your server/index.js with this:
 
+// Enhanced database migration endpoint
 app.post("/admin/migrate", async (req, res) => {
   try {
-    // First, let's check what columns exist
+    // Check existing columns
     const checkColumnsQuery = `
       SELECT column_name, table_name 
       FROM information_schema.columns 
       WHERE table_schema = 'public' 
-      AND table_name IN ('players', 'my_roster', 'watchlist')
+      AND table_name IN ('players', 'my_roster', 'watchlist', 'league_cache', 'player_analytics')
       ORDER BY table_name, column_name;
     `;
     
     const existingColumns = await safeQuery(checkColumnsQuery);
-    console.log('Existing columns:', existingColumns.rows);
+    console.log('Existing columns before migration:', existingColumns.rows);
 
-    // Create tables with correct column names
+    // Enhanced players table
     const createPlayersTable = `
       CREATE TABLE IF NOT EXISTS players (
         id SERIAL PRIMARY KEY,
         espn_id INTEGER UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL,
+        first_name VARCHAR(100),
+        last_name VARCHAR(100),
         position VARCHAR(10),
         team VARCHAR(10),
         bye_week INTEGER,
         status VARCHAR(50) DEFAULT 'active',
+        jersey_number INTEGER,
+        avg_draft_position DECIMAL,
+        avg_auction_value DECIMAL,
+        percent_owned DECIMAL,
+        percent_started DECIMAL,
+        percent_change DECIMAL,
+        is_injured BOOLEAN DEFAULT FALSE,
+        injury_status VARCHAR(50),
+        availability_status VARCHAR(50),
+        fantasy_value INTEGER DEFAULT 0,
+        waiver_priority VARCHAR(20) DEFAULT 'LOW',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -223,63 +237,110 @@ app.post("/admin/migrate", async (req, res) => {
         player_id INTEGER REFERENCES players(id) ON DELETE CASCADE,
         notes TEXT,
         priority INTEGER DEFAULT 1,
+        added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `;
 
-    // Try to add missing columns if tables exist but columns are missing
-    const addMissingColumns = [
-      `ALTER TABLE my_roster ADD COLUMN IF NOT EXISTS added_date TIMESTAMP DEFAULT NOW();`,
-      `ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`,
-      `ALTER TABLE players ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`,
-      `ALTER TABLE players ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`
-    ];
+    // League cache for storing ESPN league data
+    const createLeagueCacheTable = `
+      CREATE TABLE IF NOT EXISTS league_cache (
+        id SERIAL PRIMARY KEY,
+        league_id VARCHAR(20) NOT NULL,
+        season INTEGER NOT NULL,
+        data JSONB NOT NULL,
+        cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP,
+        UNIQUE(league_id, season)
+      );
+    `;
 
-    const createIndexes = [
-      `CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);`,
-      `CREATE INDEX IF NOT EXISTS idx_players_position ON players(position);`,
-      `CREATE INDEX IF NOT EXISTS idx_players_team ON players(team);`,
-      `CREATE INDEX IF NOT EXISTS idx_roster_player_id ON my_roster(player_id);`,
-      `CREATE INDEX IF NOT EXISTS idx_watchlist_player_id ON watchlist(player_id);`
-    ];
+    // Player analytics for tracking performance
+    const createAnalyticsTable = `
+      CREATE TABLE IF NOT EXISTS player_analytics (
+        id SERIAL PRIMARY KEY,
+        player_id INTEGER REFERENCES players(id) ON DELETE CASCADE,
+        week INTEGER NOT NULL,
+        season INTEGER NOT NULL,
+        points_scored DECIMAL,
+        projected_points DECIMAL,
+        ownership_change DECIMAL,
+        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(player_id, week, season)
+      );
+    `;
 
-    // Execute all migrations
+    // Execute table creation
     await safeQuery(createPlayersTable);
     await safeQuery(createRosterTable);
     await safeQuery(createWatchlistTable);
+    await safeQuery(createLeagueCacheTable);
+    await safeQuery(createAnalyticsTable);
 
-    // Add missing columns
-    for (const query of addMissingColumns) {
+    // *** ADD MISSING COLUMNS SECTION ***
+    console.log('Adding missing columns...');
+    
+    // Add missing columns to existing tables
+    const addColumnStatements = [
+      // Players table missing columns
+      "ALTER TABLE players ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+      "ALTER TABLE players ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+      
+      // My_roster table missing columns
+      "ALTER TABLE my_roster ADD COLUMN IF NOT EXISTS added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+      "ALTER TABLE my_roster ADD COLUMN IF NOT EXISTS notes TEXT",
+      
+      // Watchlist table missing columns  
+      "ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+      "ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+    ];
+
+    // Execute each ALTER TABLE statement
+    for (const statement of addColumnStatements) {
       try {
-        await safeQuery(query);
+        await safeQuery(statement);
+        console.log(`✅ Executed: ${statement}`);
       } catch (error) {
-        console.log(`Column might already exist: ${error.message}`);
+        console.log(`⚠️ Skipped (likely already exists): ${statement} - ${error.message}`);
       }
     }
 
-    // Create indexes
-    for (const query of createIndexes) {
+    // Create indexes for better performance
+    const createIndexes = [
+      "CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id)",
+      "CREATE INDEX IF NOT EXISTS idx_players_position ON players(position)",
+      "CREATE INDEX IF NOT EXISTS idx_my_roster_player_id ON my_roster(player_id)",
+      "CREATE INDEX IF NOT EXISTS idx_watchlist_player_id ON watchlist(player_id)",
+      "CREATE INDEX IF NOT EXISTS idx_league_cache_lookup ON league_cache(league_id, season)"
+    ];
+
+    for (const indexQuery of createIndexes) {
       try {
-        await safeQuery(query);
+        await safeQuery(indexQuery);
+        console.log(`✅ Created index: ${indexQuery}`);
       } catch (error) {
-        console.log(`Index might already exist: ${error.message}`);
+        console.log(`⚠️ Index exists: ${error.message}`);
       }
     }
 
-    // Check final column structure
+    // Check final column state
     const finalColumns = await safeQuery(checkColumnsQuery);
-    console.log('Final columns:', finalColumns.rows);
+    console.log('Final columns after migration:', finalColumns.rows);
 
-    console.log('Database migration completed successfully');
-    res.json({ 
-      ok: true, 
-      message: 'Migration completed',
+    res.json({
+      ok: true,
+      message: "Migration completed",
       existingColumns: existingColumns.rows,
       finalColumns: finalColumns.rows
     });
+
   } catch (error) {
     console.error('Migration error:', error);
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      message: "Migration failed"
+    });
   }
 });
 
