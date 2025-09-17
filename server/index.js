@@ -2,9 +2,9 @@ import 'dotenv/config';
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
-import pkg from 'pg';
 import { spawn } from 'child_process';
-const { Pool } = pkg;
+import pkg from 'pg';
+const { Pool } = pg;
 
 const app = express();
 app.use(cors());
