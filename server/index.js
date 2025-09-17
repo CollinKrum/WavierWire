@@ -152,7 +152,7 @@ app.get("/api/players", async (req, res) => {
 app.post("/api/players", async (req, res) => {
   try {
     const { espn_id, name, position, team, bye_week, status } = req.body;
-    
+
     const query = `
       INSERT INTO players (espn_id, name, position, team, bye_week, status)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -175,11 +175,188 @@ app.post("/api/players", async (req, res) => {
   }
 });
 
+// Manage saved roster
+app.get("/api/roster", async (_req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM v_my_roster ORDER BY position_slot');
+    res.json({ roster: rows });
+  } catch (error) {
+    console.error('Error fetching roster:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/roster", async (req, res) => {
+  try {
+    const { player_id, position_slot } = req.body || {};
+    if (player_id == null || position_slot == null) {
+      return res.status(400).json({ error: 'player_id, position_slot required' });
+    }
+
+    const { rows } = await pool.query(
+      'INSERT INTO my_roster (player_id, position_slot) VALUES ($1, $2) RETURNING *',
+      [player_id, position_slot]
+    );
+
+    res.json({ item: rows[0] });
+  } catch (error) {
+    console.error('Error saving roster item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/roster/:id", async (req, res) => {
+  try {
+    await pool.query('DELETE FROM my_roster WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error deleting roster item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manage watchlist
+app.get("/api/watchlist", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY added_date DESC'
+    );
+    res.json({ watchlist: rows });
+  } catch (error) {
+    console.error('Error fetching watchlist:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/watchlist", async (req, res) => {
+  try {
+    const { player_id, interest_level = 3, notes } = req.body || {};
+    if (player_id == null) {
+      return res.status(400).json({ error: 'player_id required' });
+    }
+
+    const { rows } = await pool.query(
+      'INSERT INTO watchlist (player_id, interest_level, notes) VALUES ($1, $2, $3) ON CONFLICT (player_id) DO UPDATE SET interest_level = EXCLUDED.interest_level, notes = EXCLUDED.notes RETURNING *',
+      [player_id, interest_level, notes ?? null]
+    );
+
+    res.json({ item: rows[0] });
+  } catch (error) {
+    console.error('Error saving watchlist item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/watchlist/:id", async (req, res) => {
+  try {
+    await pool.query('DELETE FROM watchlist WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error deleting watchlist item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Bulk player upsert (ingester)
+app.post("/api/players/upsert", async (req, res) => {
+  try {
+    const { players } = req.body || {};
+    if (!Array.isArray(players) || players.length === 0) {
+      return res.status(400).json({ error: 'players[] required' });
+    }
+
+    const valuesSql = players
+      .map((_player, index) => `($${index * 6 + 1}, $${index * 6 + 2}, $${index * 6 + 3}, $${index * 6 + 4}, $${index * 6 + 5}, $${index * 6 + 6})`)
+      .join(',');
+
+    const params = players.flatMap((player) => [
+      player.espn_id,
+      player.name,
+      player.position,
+      player.team,
+      player.bye_week,
+      player.status ?? 'active'
+    ]);
+
+    const sql = `
+      INSERT INTO players (espn_id, name, position, team, bye_week, status)
+      VALUES ${valuesSql}
+      ON CONFLICT (espn_id) DO UPDATE SET
+        name = EXCLUDED.name,
+        position = EXCLUDED.position,
+        team = EXCLUDED.team,
+        bye_week = EXCLUDED.bye_week,
+        status = EXCLUDED.status,
+        updated_at = NOW();
+    `;
+
+    await pool.query(sql, params);
+    res.json({ ok: true, upserted: players.length });
+  } catch (error) {
+    console.error('Error upserting players:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Player news endpoints
+app.get("/api/news", async (req, res) => {
+  try {
+    const playerIdRaw = req.query.player_id;
+    const playerId = Array.isArray(playerIdRaw) ? playerIdRaw[0] : playerIdRaw;
+
+    const params = [];
+    let sql = 'SELECT * FROM player_news';
+    if (playerId) {
+      params.push(playerId);
+      sql += ` WHERE player_id = $${params.length}`;
+    }
+    sql += ' ORDER BY published_date DESC LIMIT 200';
+
+    const { rows } = await pool.query(sql, params);
+    res.json({ news: rows });
+  } catch (error) {
+    console.error('Error fetching news:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/news/bulk", async (req, res) => {
+  try {
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'items[] required' });
+    }
+
+    const valuesSql = items
+      .map((_item, index) => `($${index * 5 + 1}, $${index * 5 + 2}, $${index * 5 + 3}, $${index * 5 + 4}, $${index * 5 + 5})`)
+      .join(',');
+
+    const params = items.flatMap((item) => [
+      item.player_id,
+      item.headline,
+      item.content ?? null,
+      item.source ?? 'misc',
+      item.published_date ?? new Date()
+    ]);
+
+    const sql = `
+      INSERT INTO player_news (player_id, headline, content, source, published_date)
+      VALUES ${valuesSql}
+    `;
+
+    await pool.query(sql, params);
+    res.json({ ok: true, inserted: items.length });
+  } catch (error) {
+    console.error('Error inserting news items:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Bulk upsert players
 app.post("/api/players/bulk", async (req, res) => {
   try {
     const { players } = req.body;
-    
+
     if (!Array.isArray(players) || players.length === 0) {
       return res.status(400).json({ error: 'Players array is required' });
     }
