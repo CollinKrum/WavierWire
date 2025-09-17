@@ -3,6 +3,7 @@ import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import pkg from 'pg';
+import { spawn } from 'child_process';
 const { Pool } = pkg;
 
 const app = express();
@@ -66,6 +67,43 @@ async function safeQuery(text, params = []) {
   return await pool.query(text, params);
 }
 
+// Helper function to run R scripts
+async function runRScript(script) {
+  return new Promise((resolve, reject) => {
+    const rProcess = spawn('Rscript', ['-e', script]);
+    
+    let output = '';
+    let errorOutput = '';
+    
+    rProcess.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+    
+    rProcess.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+    
+    rProcess.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const result = JSON.parse(output);
+          resolve(result);
+        } catch (parseError) {
+          reject(new Error(`Failed to parse R output: ${output}`));
+        }
+      } else {
+        reject(new Error(`R script failed: ${errorOutput}`));
+      }
+    });
+    
+    // Set timeout
+    setTimeout(() => {
+      rProcess.kill();
+      reject(new Error('R script timeout'));
+    }, 30000); // 30 second timeout
+  });
+}
+
 // Request logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -99,45 +137,12 @@ app.get("/", (req, res) => {
       "GET /api/watchlist",
       "GET /api/players",
       "POST /api/espn/players",
-      "GET /api/espn/test"
+      "GET /api/espn/test",
+      "GET /api/ffscrapr/test",
+      "GET /api/ffscrapr/league/:leagueId",
+      "GET /api/ffscrapr/freeagents/:leagueId"
     ]
   });
-});
-
-// Convenience endpoint: always fetch your league
-app.get("/api/espn/my-league", async (req, res) => {
-  try {
-    const season = req.query.season || new Date().getFullYear();
-    const leagueId = LEAGUE_ID;
-    if (!leagueId) {
-      return res.status(400).json({ error: "LEAGUE_ID not set in environment" });
-    }
-
-    const leagueUrl =
-      `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}` +
-      `?view=mTeam,mRoster,mSettings,mNav,mMatchup,mStandings`;
-
-    const leagueData = await espnFetchCached(
-      leagueUrl,
-      {},
-      `my_league_${leagueId}_${season}`,
-      10 * 60 * 1000
-    );
-
-    const processedLeague = processLeagueData(leagueData);
-    const insights = generateLeagueInsights(processedLeague);
-    const competitiveAnalysis = analyzeCompetitiveBalance(processedLeague.teams);
-
-    res.json({
-      league: processedLeague,
-      insights,
-      competitiveAnalysis,
-      generatedAt: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error("My-league error:", error);
-    res.status(500).json({ error: error.message });
-  }
 });
 
 // API root
@@ -175,8 +180,149 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// Database migration endpoint
-// Replace the migration endpoint in your server/index.js with this:
+// FFscrapr endpoints
+app.get("/api/ffscrapr/test", async (req, res) => {
+  try {
+    const rScript = `
+      # Test if ffscrapr is installed and working
+      if (!require("ffscrapr", quietly = TRUE)) {
+        install.packages("ffscrapr", repos = "http://cran.r-project.org")
+        library(ffscrapr)
+      }
+      
+      library(jsonlite)
+      
+      # Simple test
+      result <- list(
+        message = "ffscrapr is working!",
+        version = as.character(packageVersion("ffscrapr")),
+        success = TRUE
+      )
+      
+      cat(toJSON(result, auto_unbox = TRUE))
+    `;
+    
+    const result = await runRScript(rScript);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message, 
+      success: false,
+      message: "Make sure R and ffscrapr are installed on your server"
+    });
+  }
+});
+
+app.get("/api/ffscrapr/league/:leagueId", async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+    const { season = 2024 } = req.query;
+    
+    const rScript = `
+      library(ffscrapr)
+      library(jsonlite)
+      
+      tryCatch({
+        # Connect to ESPN league
+        conn <- espn_connect(season = ${season}, league_id = ${leagueId})
+        
+        # Get league info and rosters
+        league_data <- ff_league(conn)
+        rosters <- ff_rosters(conn)
+        
+        # Combine data
+        result <- list(
+          league = league_data,
+          rosters = rosters,
+          success = TRUE
+        )
+        
+        cat(toJSON(result, auto_unbox = TRUE))
+      }, error = function(e) {
+        cat(toJSON(list(error = e$message, success = FALSE), auto_unbox = TRUE))
+      })
+    `;
+    
+    const result = await runRScript(rScript);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message, success: false });
+  }
+});
+
+app.get("/api/ffscrapr/freeagents/:leagueId", async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+    const { season = 2024 } = req.query;
+    
+    const rScript = `
+      library(ffscrapr)
+      library(jsonlite)
+      
+      tryCatch({
+        # Connect to ESPN league
+        conn <- espn_connect(season = ${season}, league_id = ${leagueId})
+        
+        # Get free agents
+        free_agents <- ff_freeagents(conn)
+        
+        result <- list(
+          players = free_agents,
+          success = TRUE
+        )
+        
+        cat(toJSON(result, auto_unbox = TRUE))
+      }, error = function(e) {
+        cat(toJSON(list(error = e$message, success = FALSE), auto_unbox = TRUE))
+      })
+    `;
+    
+    const result = await runRScript(rScript);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message, success: false });
+  }
+});
+
+app.get("/api/ffscrapr/players/:leagueId", async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+    const { season = 2024, position } = req.query;
+    
+    const positionFilter = position ? `filter(pos == "${position}")` : "";
+    
+    const rScript = `
+      library(ffscrapr)
+      library(jsonlite)
+      library(dplyr)
+      
+      tryCatch({
+        # Connect to ESPN league
+        conn <- espn_connect(season = ${season}, league_id = ${leagueId})
+        
+        # Get all players
+        all_players <- ff_playerscores(conn)
+        
+        # Apply position filter if specified
+        ${positionFilter ? `all_players <- all_players %>% ${positionFilter}` : ""}
+        
+        result <- list(
+          players = all_players,
+          success = TRUE
+        )
+        
+        cat(toJSON(result, auto_unbox = TRUE))
+      }, error = function(e) {
+        cat(toJSON(list(error = e$message, success = FALSE), auto_unbox = TRUE))
+      })
+    `;
+    
+    const result = await runRScript(rScript);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message, success: false });
+  }
+});
 
 // Enhanced database migration endpoint
 app.post("/admin/migrate", async (req, res) => {
@@ -344,7 +490,7 @@ app.post("/admin/migrate", async (req, res) => {
   }
 });
 
-// Also update the watchlist endpoint to handle missing columns gracefully:
+// Watchlist endpoints
 app.get("/api/watchlist", async (req, res) => {
   if (!pool) {
     return res.json({ watchlist: [], message: 'Database not available' });
@@ -379,7 +525,44 @@ app.get("/api/watchlist", async (req, res) => {
   }
 });
 
-// Update roster endpoint to handle missing columns:
+app.post("/api/watchlist", async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    const { player_id, interest_level = 3, notes } = req.body || {};
+    if (player_id == null) {
+      return res.status(400).json({ error: 'player_id required' });
+    }
+
+    const { rows } = await safeQuery(
+      'INSERT INTO watchlist (player_id, priority, notes) VALUES ($1, $2, $3) RETURNING *',
+      [player_id, interest_level, notes ?? null]
+    );
+
+    res.json({ item: rows[0] });
+  } catch (error) {
+    console.error('Error saving watchlist item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/watchlist/:id", async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: 'Database not available' });
+    }
+
+    await safeQuery('DELETE FROM watchlist WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error deleting watchlist item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Roster endpoints
 app.get("/api/roster", async (_req, res) => {
   if (!pool) {
     return res.json({ roster: [], message: 'Database not available' });
@@ -462,83 +645,6 @@ app.get("/api/roster", async (_req, res) => {
     }
   }
 });
-// Add or update a player
-app.post("/api/players", async (req, res) => {
-  try {
-    if (!pool) {
-      return res.status(500).json({ error: 'Database not available' });
-    }
-
-    const { espn_id, name, position, team, bye_week, status } = req.body;
-
-    const query = `
-      INSERT INTO players (espn_id, name, position, team, bye_week, status)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (espn_id) 
-      DO UPDATE SET 
-        name = EXCLUDED.name,
-        position = EXCLUDED.position,
-        team = EXCLUDED.team,
-        bye_week = EXCLUDED.bye_week,
-        status = EXCLUDED.status,
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING *;
-    `;
-
-    const result = await safeQuery(query, [espn_id, name, position, team, bye_week, status]);
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('Error adding/updating player:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Manage saved roster
-app.get("/api/roster", async (_req, res) => {
-  if (!pool) {
-    return res.json({ roster: [], message: 'Database not available' });
-  }
-
-  try {
-    const { rows } = await safeQuery(`
-      SELECT
-        r.id,
-        r.position_slot,
-        r.added_date,
-        r.notes AS roster_notes,
-        p.id AS player_id,
-        p.espn_id,
-        p.name,
-        p.position,
-        p.team,
-        p.bye_week,
-        p.status
-      FROM my_roster r
-      JOIN players p ON p.id = r.player_id
-      ORDER BY
-        CASE r.position_slot
-          WHEN 'QB' THEN 1
-          WHEN 'RB' THEN 2
-          WHEN 'WR' THEN 3
-          WHEN 'TE' THEN 4
-          WHEN 'FLEX' THEN 5
-          WHEN 'D/ST' THEN 6
-          WHEN 'K' THEN 7
-          WHEN 'BENCH' THEN 8
-          ELSE 9
-        END;
-    `);
-    return res.json({ roster: rows });
-  } catch (error) {
-    if (error?.code === '42P01') {
-      console.warn('[WARN] Roster tables missing, returning empty roster');
-      return res.json({ roster: [], message: 'Roster tables not created yet' });
-    }
-
-    console.error('Error fetching roster:', error);
-    return res.status(500).json({ error: error.message });
-  }
-});
 
 app.post("/api/roster", async (req, res) => {
   try {
@@ -577,60 +683,33 @@ app.delete("/api/roster/:id", async (req, res) => {
   }
 });
 
-// Manage watchlist
-app.get("/api/watchlist", async (req, res) => {
-  if (!pool) {
-    return res.json({ watchlist: [], message: 'Database not available' });
-  }
-
-  try {
-    const { rows } = await safeQuery(
-      'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY created_at DESC'
-    );
-    res.json({ watchlist: rows });
-  } catch (error) {
-    if (error?.code === '42P01') {
-      console.warn('[WARN] Watchlist table missing');
-      return res.json({ watchlist: [], message: 'Watchlist table not created yet' });
-    }
-    console.error('Error fetching watchlist:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post("/api/watchlist", async (req, res) => {
+// Player management endpoints
+app.post("/api/players", async (req, res) => {
   try {
     if (!pool) {
       return res.status(500).json({ error: 'Database not available' });
     }
 
-    const { player_id, interest_level = 3, notes } = req.body || {};
-    if (player_id == null) {
-      return res.status(400).json({ error: 'player_id required' });
-    }
+    const { espn_id, name, position, team, bye_week, status } = req.body;
 
-    const { rows } = await safeQuery(
-      'INSERT INTO watchlist (player_id, priority, notes) VALUES ($1, $2, $3) RETURNING *',
-      [player_id, interest_level, notes ?? null]
-    );
+    const query = `
+      INSERT INTO players (espn_id, name, position, team, bye_week, status)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (espn_id) 
+      DO UPDATE SET 
+        name = EXCLUDED.name,
+        position = EXCLUDED.position,
+        team = EXCLUDED.team,
+        bye_week = EXCLUDED.bye_week,
+        status = EXCLUDED.status,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *;
+    `;
 
-    res.json({ item: rows[0] });
+    const result = await safeQuery(query, [espn_id, name, position, team, bye_week, status]);
+    res.json(result.rows[0]);
   } catch (error) {
-    console.error('Error saving watchlist item:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete("/api/watchlist/:id", async (req, res) => {
-  try {
-    if (!pool) {
-      return res.status(500).json({ error: 'Database not available' });
-    }
-
-    await safeQuery('DELETE FROM watchlist WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
-  } catch (error) {
-    console.error('Error deleting watchlist item:', error);
+    console.error('Error adding/updating player:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -686,7 +765,7 @@ app.post("/api/players/bulk", async (req, res) => {
   }
 });
 
-// ESPN API endpoints
+// ESPN API endpoints (legacy - kept for backwards compatibility)
 app.get("/api/espn/league", async (req, res) => {
   try {
     const { season, leagueId, view } = req.query;
@@ -794,8 +873,12 @@ app.use('*', (req, res) => {
       'POST /api/espn/players',
       'GET /api/roster',
       'GET /api/watchlist',
-      'GET /api/players',
-      'POST /admin/migrate'
+      'POST /api/players',
+      'POST /admin/migrate',
+      'GET /api/ffscrapr/test',
+      'GET /api/ffscrapr/league/:leagueId',
+      'GET /api/ffscrapr/freeagents/:leagueId',
+      'GET /api/ffscrapr/players/:leagueId'
     ]
   });
 });
@@ -815,4 +898,5 @@ app.listen(PORT, () => {
   console.log(`Fantasy proxy running on ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
   console.log(`ESPN test: http://localhost:${PORT}/api/espn/test`);
+  console.log(`FFscrapr test: http://localhost:${PORT}/api/ffscrapr/test`);
 });
