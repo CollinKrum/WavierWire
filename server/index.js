@@ -11,6 +11,7 @@ app.use(express.json());
 
 const SWID = process.env.SWID;
 const ESPN_S2 = process.env.ESPN_S2;
+const LEAGUE_ID = process.env.LEAGUE_ID;
 const DATABASE_URL = process.env.DATABASE_URL;
 
 if (!SWID || !ESPN_S2) {
@@ -101,6 +102,42 @@ app.get("/", (req, res) => {
       "GET /api/espn/test"
     ]
   });
+});
+
+// Convenience endpoint: always fetch your league
+app.get("/api/espn/my-league", async (req, res) => {
+  try {
+    const season = req.query.season || new Date().getFullYear();
+    const leagueId = LEAGUE_ID;
+    if (!leagueId) {
+      return res.status(400).json({ error: "LEAGUE_ID not set in environment" });
+    }
+
+    const leagueUrl =
+      `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}` +
+      `?view=mTeam,mRoster,mSettings,mNav,mMatchup,mStandings`;
+
+    const leagueData = await espnFetchCached(
+      leagueUrl,
+      {},
+      `my_league_${leagueId}_${season}`,
+      10 * 60 * 1000
+    );
+
+    const processedLeague = processLeagueData(leagueData);
+    const insights = generateLeagueInsights(processedLeague);
+    const competitiveAnalysis = analyzeCompetitiveBalance(processedLeague.teams);
+
+    res.json({
+      league: processedLeague,
+      insights,
+      competitiveAnalysis,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("My-league error:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // API root
