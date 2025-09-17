@@ -25,7 +25,8 @@ services:
         sync: false           # set in Render UI (looks like {ED477261-...})
       - key: ESPN_S2
         sync: false           # long cookie string
-
+      - key: LEAGUE_ID
+        sync: false 
       # Neon Postgres — use the pooler URL with sslmode=require
       - key: DATABASE_URL
         sync: false
@@ -45,6 +46,8 @@ services:
         - key: SWID
           sync: false
         - key: ESPN_S2
+          sync: false
+        - key: LEAGUE_ID
           sync: false
         - key: DATABASE_URL
           sync: false
