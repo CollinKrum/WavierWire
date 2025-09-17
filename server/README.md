@@ -11,6 +11,25 @@ Configure the following variables before starting the server:
 | `DATABASE_URL` | ✅ | Postgres connection string used for roster and watchlist data. |
 | `SWID` | ✅ | ESPN authentication cookie value. Required for all authenticated ESPN API requests. |
 | `ESPN_S2` | ✅ | ESPN authentication cookie value paired with `SWID`. |
+| `USE_ESPN_SCRAPER` | ⛔️ | Defaults to `1` so routes proxy through the unofficial ESPN "LM API" host used by [ffscrapr](https://github.com/ffverse/ffscrapr). Set to `0` to fall back to the standard API host. |
+| `ESPN_SCRAPER_HOST` | ⛔️ | Override host for scraper mode (defaults to `https://lm-api-reads.fantasy.espn.com`). |
+
+### ESPN scraper mode
+
+Scraper mode is on by default so the server emulates the [`ffscrapr`](https://ffscrapr.ffverse.com/) workflow instead of calling the standard `fantasy.espn.com` API directly. To explicitly start the server in scraper mode (or to illustrate the default):
+
+```bash
+USE_ESPN_SCRAPER=1 node index.js
+```
+
+With scraper mode enabled the proxy swaps requests to `https://lm-api-reads.fantasy.espn.com`, forwards the same `x-fantasy-filter` headers, and sends a `User-Agent` matching the ffscrapr tooling. You can still provide `SWID`/`ESPN_S2` cookies (recommended for private leagues), but they are no longer mandatory for public data pulls.
+
+To opt out and hit the standard API host directly, set:
+
+```bash
+USE_ESPN_SCRAPER=0 node index.js
+```
+
 | `PORT` | ⛔️ | Optional port (defaults to `8081`). |
 | `USE_MOCK_WAIVER_DATA` | ⛔️ | When set to `1`, the waiver analysis endpoint uses built-in sample data. Helpful for local development or automated tests without ESPN access. |
 
