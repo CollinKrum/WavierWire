@@ -141,7 +141,7 @@ app.get("/api/players", async (req, res) => {
     params.push(parseInt(limit));
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    res.json({ players: result.rows });
   } catch (error) {
     console.error('Error fetching players:', error);
     res.status(500).json({ error: error.message });

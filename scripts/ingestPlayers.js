@@ -196,7 +196,8 @@ async function ingestAllPlayers() {
   console.log('\n🔍 Testing database...');
   try {
     const testResponse = await fetch(`${API_BASE_URL}/api/players?limit=5`);
-    const testPlayers = await testResponse.json();
+    const testData = await testResponse.json();
+    const testPlayers = testData.players || [];
     console.log('Sample players in database:');
     testPlayers.forEach(p => {
       console.log(`  - ${p.name} (${p.position}, ${p.team})`);
