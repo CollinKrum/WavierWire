@@ -139,8 +139,23 @@ app.get("/api/health", async (req, res) => {
 });
 
 // Database migration endpoint
+// Replace the migration endpoint in your server/index.js with this:
+
 app.post("/admin/migrate", async (req, res) => {
   try {
+    // First, let's check what columns exist
+    const checkColumnsQuery = `
+      SELECT column_name, table_name 
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+      AND table_name IN ('players', 'my_roster', 'watchlist')
+      ORDER BY table_name, column_name;
+    `;
+    
+    const existingColumns = await safeQuery(checkColumnsQuery);
+    console.log('Existing columns:', existingColumns.rows);
+
+    // Create tables with correct column names
     const createPlayersTable = `
       CREATE TABLE IF NOT EXISTS players (
         id SERIAL PRIMARY KEY,
@@ -149,19 +164,9 @@ app.post("/admin/migrate", async (req, res) => {
         position VARCHAR(10),
         team VARCHAR(10),
         bye_week INTEGER,
-        status VARCHAR(50),
+        status VARCHAR(50) DEFAULT 'active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
-
-    const createWatchlistTable = `
-      CREATE TABLE IF NOT EXISTS watchlist (
-        id SERIAL PRIMARY KEY,
-        player_id INTEGER REFERENCES players(id),
-        notes TEXT,
-        priority INTEGER DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `;
 
@@ -175,61 +180,190 @@ app.post("/admin/migrate", async (req, res) => {
       );
     `;
 
-    const createIndexes = `
-      CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);
-      CREATE INDEX IF NOT EXISTS idx_players_position ON players(position);
-      CREATE INDEX IF NOT EXISTS idx_players_team ON players(team);
+    const createWatchlistTable = `
+      CREATE TABLE IF NOT EXISTS watchlist (
+        id SERIAL PRIMARY KEY,
+        player_id INTEGER REFERENCES players(id) ON DELETE CASCADE,
+        notes TEXT,
+        priority INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
     `;
 
+    // Try to add missing columns if tables exist but columns are missing
+    const addMissingColumns = [
+      `ALTER TABLE my_roster ADD COLUMN IF NOT EXISTS added_date TIMESTAMP DEFAULT NOW();`,
+      `ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`,
+      `ALTER TABLE players ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`,
+      `ALTER TABLE players ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`
+    ];
+
+    const createIndexes = [
+      `CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_players_position ON players(position);`,
+      `CREATE INDEX IF NOT EXISTS idx_players_team ON players(team);`,
+      `CREATE INDEX IF NOT EXISTS idx_roster_player_id ON my_roster(player_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_watchlist_player_id ON watchlist(player_id);`
+    ];
+
+    // Execute all migrations
     await safeQuery(createPlayersTable);
-    await safeQuery(createWatchlistTable);
     await safeQuery(createRosterTable);
-    await safeQuery(createIndexes);
+    await safeQuery(createWatchlistTable);
+
+    // Add missing columns
+    for (const query of addMissingColumns) {
+      try {
+        await safeQuery(query);
+      } catch (error) {
+        console.log(`Column might already exist: ${error.message}`);
+      }
+    }
+
+    // Create indexes
+    for (const query of createIndexes) {
+      try {
+        await safeQuery(query);
+      } catch (error) {
+        console.log(`Index might already exist: ${error.message}`);
+      }
+    }
+
+    // Check final column structure
+    const finalColumns = await safeQuery(checkColumnsQuery);
+    console.log('Final columns:', finalColumns.rows);
 
     console.log('Database migration completed successfully');
-    res.json({ ok: true, message: 'Migration completed' });
+    res.json({ 
+      ok: true, 
+      message: 'Migration completed',
+      existingColumns: existingColumns.rows,
+      finalColumns: finalColumns.rows
+    });
   } catch (error) {
     console.error('Migration error:', error);
     res.status(500).json({ ok: false, error: error.message });
   }
 });
 
-// Get all players from database
-app.get("/api/players", async (req, res) => {
+// Also update the watchlist endpoint to handle missing columns gracefully:
+app.get("/api/watchlist", async (req, res) => {
+  if (!pool) {
+    return res.json({ watchlist: [], message: 'Database not available' });
+  }
+
   try {
-    const { position, team, limit = 50 } = req.query;
-    
-    if (!pool) {
-      return res.json({ players: [], message: 'Database not available' });
-    }
-    
-    let query = 'SELECT * FROM players WHERE 1=1';
-    const params = [];
-    let paramIndex = 1;
-
-    if (position) {
-      query += ` AND position = $${paramIndex}`;
-      params.push(position);
-      paramIndex++;
-    }
-
-    if (team) {
-      query += ` AND team = $${paramIndex}`;
-      params.push(team);
-      paramIndex++;
-    }
-
-    query += ` ORDER BY name LIMIT $${paramIndex}`;
-    params.push(parseInt(limit));
-
-    const result = await safeQuery(query, params);
-    res.json({ players: result.rows });
+    // Try the query with created_at first
+    let { rows } = await safeQuery(
+      'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY w.created_at DESC'
+    );
+    res.json({ watchlist: rows });
   } catch (error) {
-    console.error('Error fetching players:', error);
-    res.status(500).json({ error: error.message });
+    if (error?.code === '42703') {
+      // Column doesn't exist, try without created_at
+      console.warn('[WARN] created_at column missing, using fallback query');
+      try {
+        const { rows } = await safeQuery(
+          'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY w.id DESC'
+        );
+        res.json({ watchlist: rows });
+      } catch (fallbackError) {
+        console.error('Fallback query also failed:', fallbackError);
+        res.json({ watchlist: [], message: 'Watchlist table structure mismatch' });
+      }
+    } else if (error?.code === '42P01') {
+      console.warn('[WARN] Watchlist table missing');
+      return res.json({ watchlist: [], message: 'Watchlist table not created yet' });
+    } else {
+      console.error('Error fetching watchlist:', error);
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
+// Update roster endpoint to handle missing columns:
+app.get("/api/roster", async (_req, res) => {
+  if (!pool) {
+    return res.json({ roster: [], message: 'Database not available' });
+  }
+
+  try {
+    // Try with added_date first
+    const { rows } = await safeQuery(`
+      SELECT
+        r.id,
+        r.position_slot,
+        r.added_date,
+        r.notes AS roster_notes,
+        p.id AS player_id,
+        p.espn_id,
+        p.name,
+        p.position,
+        p.team,
+        p.bye_week,
+        p.status
+      FROM my_roster r
+      JOIN players p ON p.id = r.player_id
+      ORDER BY
+        CASE r.position_slot
+          WHEN 'QB' THEN 1
+          WHEN 'RB' THEN 2
+          WHEN 'WR' THEN 3
+          WHEN 'TE' THEN 4
+          WHEN 'FLEX' THEN 5
+          WHEN 'D/ST' THEN 6
+          WHEN 'K' THEN 7
+          WHEN 'BENCH' THEN 8
+          ELSE 9
+        END;
+    `);
+    return res.json({ roster: rows });
+  } catch (error) {
+    if (error?.code === '42703') {
+      // Column doesn't exist, try without added_date
+      console.warn('[WARN] added_date column missing, using fallback query');
+      try {
+        const { rows } = await safeQuery(`
+          SELECT
+            r.id,
+            r.position_slot,
+            r.notes AS roster_notes,
+            p.id AS player_id,
+            p.espn_id,
+            p.name,
+            p.position,
+            p.team,
+            p.bye_week,
+            p.status
+          FROM my_roster r
+          JOIN players p ON p.id = r.player_id
+          ORDER BY
+            CASE r.position_slot
+              WHEN 'QB' THEN 1
+              WHEN 'RB' THEN 2
+              WHEN 'WR' THEN 3
+              WHEN 'TE' THEN 4
+              WHEN 'FLEX' THEN 5
+              WHEN 'D/ST' THEN 6
+              WHEN 'K' THEN 7
+              WHEN 'BENCH' THEN 8
+              ELSE 9
+            END;
+        `);
+        return res.json({ roster: rows });
+      } catch (fallbackError) {
+        console.error('Fallback query also failed:', fallbackError);
+        return res.json({ roster: [], message: 'Roster table structure mismatch' });
+      }
+    } else if (error?.code === '42P01') {
+      console.warn('[WARN] Roster tables missing, returning empty roster');
+      return res.json({ roster: [], message: 'Roster tables not created yet' });
+    } else {
+      console.error('Error fetching roster:', error);
+      return res.status(500).json({ error: error.message });
+    }
+  }
+});
 // Add or update a player
 app.post("/api/players", async (req, res) => {
   try {
