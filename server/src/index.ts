@@ -6,6 +6,7 @@ import playersRouter from './routes/players';
 import rosterRouter from './routes/roster';
 import watchlistRouter from './routes/watchlist';
 import newsRouter from './routes/news';
+import espnRouter from './routes/espn';
 
 
 const app = express();
@@ -20,6 +21,7 @@ app.use('/api/players', playersRouter);
 app.use('/api/roster', rosterRouter);
 app.use('/api/watchlist', watchlistRouter);
 app.use('/api/news', newsRouter);
+app.use('/api/espn', espnRouter);
 
 
 const PORT = Number(process.env.PORT || 8080);
