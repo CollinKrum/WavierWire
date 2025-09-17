@@ -405,12 +405,58 @@ app.post("/api/players", async (req, res) => {
 
 // Manage saved roster
 app.get("/api/roster", async (_req, res) => {
+  const viewQuery = 'SELECT * FROM v_my_roster ORDER BY position_slot';
   try {
-    const { rows } = await pool.query('SELECT * FROM v_my_roster ORDER BY position_slot');
-    res.json({ roster: rows });
+    const { rows } = await pool.query(viewQuery);
+    return res.json({ roster: rows });
   } catch (error) {
+    if (error?.code === '42P01') {
+      console.warn('[WARN] v_my_roster view missing, using fallback query');
+      const fallbackQuery = `
+        SELECT
+          r.id,
+          r.position_slot,
+          r.added_date,
+          r.notes AS roster_notes,
+          p.id AS player_id,
+          p.espn_id,
+          p.name,
+          p.position,
+          p.team,
+          p.bye_week,
+          p.status
+        FROM my_roster r
+        JOIN players p ON p.id = r.player_id
+        ORDER BY
+          CASE r.position_slot
+            WHEN 'QB' THEN 1
+            WHEN 'RB' THEN 2
+            WHEN 'WR' THEN 3
+            WHEN 'TE' THEN 4
+            WHEN 'FLEX' THEN 5
+            WHEN 'D/ST' THEN 6
+            WHEN 'K' THEN 7
+            WHEN 'BENCH' THEN 8
+            ELSE 9
+          END;
+      `;
+
+      try {
+        const { rows } = await pool.query(fallbackQuery);
+        return res.json({ roster: rows });
+      } catch (fallbackError) {
+        if (fallbackError?.code === '42P01') {
+          console.warn('[WARN] Roster tables missing, returning empty roster');
+          return res.json({ roster: [] });
+        }
+
+        console.error('Error fetching roster via fallback:', fallbackError);
+        return res.status(500).json({ error: fallbackError.message });
+      }
+    }
+
     console.error('Error fetching roster:', error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
 
