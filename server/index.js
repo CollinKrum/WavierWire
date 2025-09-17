@@ -67,39 +67,39 @@ async function safeQuery(text, params = []) {
   return await pool.query(text, params);
 }
 
-// Helper function to run R scripts
-async function runRScript(script) {
+// Helper function to run Python scripts
+async function runPythonScript(script) {
   return new Promise((resolve, reject) => {
-    const rProcess = spawn('Rscript', ['-e', script]);
+    const pythonProcess = spawn('python3', ['-c', script]);
     
     let output = '';
     let errorOutput = '';
     
-    rProcess.stdout.on('data', (data) => {
+    pythonProcess.stdout.on('data', (data) => {
       output += data.toString();
     });
     
-    rProcess.stderr.on('data', (data) => {
+    pythonProcess.stderr.on('data', (data) => {
       errorOutput += data.toString();
     });
     
-    rProcess.on('close', (code) => {
+    pythonProcess.on('close', (code) => {
       if (code === 0) {
         try {
           const result = JSON.parse(output);
           resolve(result);
         } catch (parseError) {
-          reject(new Error(`Failed to parse R output: ${output}`));
+          reject(new Error(`Failed to parse Python output: ${output}`));
         }
       } else {
-        reject(new Error(`R script failed: ${errorOutput}`));
+        reject(new Error(`Python script failed: ${errorOutput}`));
       }
     });
     
     // Set timeout
     setTimeout(() => {
-      rProcess.kill();
-      reject(new Error('R script timeout'));
+      pythonProcess.kill();
+      reject(new Error('Python script timeout'));
     }, 30000); // 30 second timeout
   });
 }
@@ -110,22 +110,6 @@ app.use((req, res, next) => {
   next();
 });
 
-async function espnFetch(url, init = {}) {
-  const headers = {
-    Cookie: `SWID=${SWID}; ESPN_S2=${ESPN_S2}`,
-    "x-fantasy-filter": init.filter ? JSON.stringify(init.filter) : undefined,
-    ...(init.headers || {})
-  };
-  Object.keys(headers).forEach((k) => headers[k] === undefined && delete headers[k]);
-
-  const res = await fetch(url, { headers, method: "GET" });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`ESPN ${res.status}: ${text}`);
-  }
-  return res.json();
-}
-
 // Root endpoint
 app.get("/", (req, res) => {
   res.json({ 
@@ -135,12 +119,10 @@ app.get("/", (req, res) => {
       "GET /api/health",
       "GET /api/roster", 
       "GET /api/watchlist",
-      "GET /api/players",
-      "POST /api/espn/players",
-      "GET /api/espn/test",
-      "GET /api/ffscrapr/test",
-      "GET /api/ffscrapr/league/:leagueId",
-      "GET /api/ffscrapr/freeagents/:leagueId"
+      "POST /api/players",
+      "GET /api/espn/python/test",
+      "GET /api/espn/python/league/:leagueId",
+      "GET /api/espn/python/freeagents/:leagueId"
     ]
   });
 });
@@ -169,7 +151,8 @@ app.get("/api/health", async (req, res) => {
       status: 'ok', 
       database: dbStatus,
       timestamp: dbTime,
-      espn_auth: !!(SWID && ESPN_S2)
+      espn_auth: !!(SWID && ESPN_S2),
+      integration: 'python'
     });
   } catch (error) {
     res.status(500).json({ 
@@ -180,154 +163,235 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// FFscrapr endpoints
-app.get("/api/ffscrapr/test", async (req, res) => {
+// Python ESPN endpoints
+app.get("/api/espn/python/test", async (req, res) => {
   try {
-    const rScript = `
-      # Test if ffscrapr is installed and working
-      if (!require("ffscrapr", quietly = TRUE)) {
-        install.packages("ffscrapr", repos = "http://cran.r-project.org")
-        library(ffscrapr)
-      }
-      
-      library(jsonlite)
-      
-      # Simple test
-      result <- list(
-        message = "ffscrapr is working!",
-        version = as.character(packageVersion("ffscrapr")),
-        success = TRUE
-      )
-      
-      cat(toJSON(result, auto_unbox = TRUE))
+    const pythonScript = `
+import json
+try:
+    from espn_api.football import League
+    result = {
+        "message": "Python ESPN API is working!",
+        "espn_api_available": True,
+        "success": True
+    }
+    print(json.dumps(result))
+except ImportError as e:
+    result = {
+        "message": "ESPN API not installed",
+        "error": str(e),
+        "success": False
+    }
+    print(json.dumps(result))
+except Exception as e:
+    result = {
+        "message": "Error testing ESPN API",
+        "error": str(e),
+        "success": False
+    }
+    print(json.dumps(result))
     `;
     
-    const result = await runRScript(rScript);
+    const result = await runPythonScript(pythonScript);
     res.json(result);
   } catch (error) {
     res.status(500).json({ 
       error: error.message, 
       success: false,
-      message: "Make sure R and ffscrapr are installed on your server"
+      message: "Make sure Python and espn-api are installed on your server"
     });
   }
 });
 
-app.get("/api/ffscrapr/league/:leagueId", async (req, res) => {
+app.get("/api/espn/python/league/:leagueId", async (req, res) => {
   try {
     const { leagueId } = req.params;
     const { season = 2024 } = req.query;
     
-    const rScript = `
-      library(ffscrapr)
-      library(jsonlite)
-      
-      tryCatch({
-        # Connect to ESPN league
-        conn <- espn_connect(season = ${season}, league_id = ${leagueId})
-        
-        # Get league info and rosters
-        league_data <- ff_league(conn)
-        rosters <- ff_rosters(conn)
-        
-        # Combine data
-        result <- list(
-          league = league_data,
-          rosters = rosters,
-          success = TRUE
-        )
-        
-        cat(toJSON(result, auto_unbox = TRUE))
-      }, error = function(e) {
-        cat(toJSON(list(error = e$message, success = FALSE), auto_unbox = TRUE))
-      })
+    const pythonScript = `
+import json
+from espn_api.football import League
+
+try:
+    league = League(
+        league_id=${leagueId}, 
+        year=${season}, 
+        espn_s2="${ESPN_S2}", 
+        swid="${SWID}"
+    )
+    
+    teams_data = []
+    for team in league.teams:
+        owner = getattr(team, 'owner', 'Unknown')
+        teams_data.append({
+            "name": team.team_name,
+            "owner": owner,
+            "wins": team.wins,
+            "losses": team.losses,
+            "ties": getattr(team, 'ties', 0),
+            "points_for": getattr(team, 'points_for', 0),
+            "points_against": getattr(team, 'points_against', 0)
+        })
+    
+    result = {
+        "league_name": league.settings.name,
+        "season": ${season},
+        "team_count": league.settings.team_count,
+        "teams": teams_data,
+        "success": True
+    }
+    
+    print(json.dumps(result))
+    
+except Exception as e:
+    result = {
+        "error": str(e),
+        "success": False
+    }
+    print(json.dumps(result))
     `;
     
-    const result = await runRScript(rScript);
+    const result = await runPythonScript(pythonScript);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message, success: false });
   }
 });
 
-app.get("/api/ffscrapr/freeagents/:leagueId", async (req, res) => {
+app.get("/api/espn/python/freeagents/:leagueId", async (req, res) => {
   try {
     const { leagueId } = req.params;
-    const { season = 2024 } = req.query;
+    const { season = 2024, size = 50, position } = req.query;
     
-    const rScript = `
-      library(ffscrapr)
-      library(jsonlite)
-      
-      tryCatch({
-        # Connect to ESPN league
-        conn <- espn_connect(season = ${season}, league_id = ${leagueId})
-        
-        # Get free agents
-        free_agents <- ff_freeagents(conn)
-        
-        result <- list(
-          players = free_agents,
-          success = TRUE
-        )
-        
-        cat(toJSON(result, auto_unbox = TRUE))
-      }, error = function(e) {
-        cat(toJSON(list(error = e$message, success = FALSE), auto_unbox = TRUE))
-      })
+    const positionFilter = position ? `if p.position == "${position.toUpperCase()}"` : "True";
+    
+    const pythonScript = `
+import json
+from espn_api.football import League
+
+try:
+    league = League(
+        league_id=${leagueId}, 
+        year=${season}, 
+        espn_s2="${ESPN_S2}", 
+        swid="${SWID}"
+    )
+    
+    free_agents = league.free_agents(size=${size})
+    
+    players_data = []
+    for p in free_agents:
+        if ${positionFilter}:
+            players_data.append({
+                "name": p.name,
+                "position": p.position,
+                "team": p.proTeam,
+                "percent_owned": getattr(p, 'percent_owned', 0),
+                "percent_started": getattr(p, 'percent_started', 0),
+                "points": getattr(p, 'total_points', 0),
+                "projected_points": getattr(p, 'projected_total_points', 0)
+            })
+    
+    result = {
+        "players": players_data,
+        "league_name": league.settings.name,
+        "season": ${season},
+        "success": True
+    }
+    
+    print(json.dumps(result))
+    
+except Exception as e:
+    result = {
+        "error": str(e),
+        "success": False
+    }
+    print(json.dumps(result))
     `;
     
-    const result = await runRScript(rScript);
+    const result = await runPythonScript(pythonScript);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message, success: false });
   }
 });
 
-app.get("/api/ffscrapr/players/:leagueId", async (req, res) => {
+app.get("/api/espn/python/players/:leagueId", async (req, res) => {
   try {
     const { leagueId } = req.params;
-    const { season = 2024, position } = req.query;
+    const { season = 2024, position, week } = req.query;
     
-    const positionFilter = position ? `filter(pos == "${position}")` : "";
+    const positionFilter = position ? `if p.position == "${position.toUpperCase()}"` : "True";
+    const weekParam = week ? `, week=${week}` : "";
     
-    const rScript = `
-      library(ffscrapr)
-      library(jsonlite)
-      library(dplyr)
-      
-      tryCatch({
-        # Connect to ESPN league
-        conn <- espn_connect(season = ${season}, league_id = ${leagueId})
-        
-        # Get all players
-        all_players <- ff_playerscores(conn)
-        
-        # Apply position filter if specified
-        ${positionFilter ? `all_players <- all_players %>% ${positionFilter}` : ""}
-        
-        result <- list(
-          players = all_players,
-          success = TRUE
-        )
-        
-        cat(toJSON(result, auto_unbox = TRUE))
-      }, error = function(e) {
-        cat(toJSON(list(error = e$message, success = FALSE), auto_unbox = TRUE))
-      })
+    const pythonScript = `
+import json
+from espn_api.football import League
+
+try:
+    league = League(
+        league_id=${leagueId}, 
+        year=${season}, 
+        espn_s2="${ESPN_S2}", 
+        swid="${SWID}"
+    )
+    
+    # Get both free agents and rostered players
+    all_players = []
+    
+    # Add free agents
+    free_agents = league.free_agents(size=100)
+    for p in free_agents:
+        if ${positionFilter}:
+            all_players.append({
+                "name": p.name,
+                "position": p.position,
+                "team": p.proTeam,
+                "status": "free_agent",
+                "percent_owned": getattr(p, 'percent_owned', 0),
+                "points": getattr(p, 'total_points', 0)
+            })
+    
+    # Add rostered players
+    for team in league.teams:
+        for p in team.roster:
+            if ${positionFilter}:
+                all_players.append({
+                    "name": p.name,
+                    "position": p.position,
+                    "team": p.proTeam,
+                    "status": "rostered",
+                    "owner": team.team_name,
+                    "points": getattr(p, 'total_points', 0)
+                })
+    
+    result = {
+        "players": all_players,
+        "league_name": league.settings.name,
+        "season": ${season},
+        "success": True
+    }
+    
+    print(json.dumps(result))
+    
+except Exception as e:
+    result = {
+        "error": str(e),
+        "success": False
+    }
+    print(json.dumps(result))
     `;
     
-    const result = await runRScript(rScript);
+    const result = await runPythonScript(pythonScript);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message, success: false });
   }
 });
 
-// Enhanced database migration endpoint
+// Enhanced database migration endpoint (keep your working migration)
 app.post("/admin/migrate", async (req, res) => {
   try {
-    // Check existing columns
     const checkColumnsQuery = `
       SELECT column_name, table_name 
       FROM information_schema.columns 
@@ -339,7 +403,6 @@ app.post("/admin/migrate", async (req, res) => {
     const existingColumns = await safeQuery(checkColumnsQuery);
     console.log('Existing columns before migration:', existingColumns.rows);
 
-    // Enhanced players table
     const createPlayersTable = `
       CREATE TABLE IF NOT EXISTS players (
         id SERIAL PRIMARY KEY,
@@ -388,7 +451,6 @@ app.post("/admin/migrate", async (req, res) => {
       );
     `;
 
-    // League cache for storing ESPN league data
     const createLeagueCacheTable = `
       CREATE TABLE IF NOT EXISTS league_cache (
         id SERIAL PRIMARY KEY,
@@ -401,7 +463,6 @@ app.post("/admin/migrate", async (req, res) => {
       );
     `;
 
-    // Player analytics for tracking performance
     const createAnalyticsTable = `
       CREATE TABLE IF NOT EXISTS player_analytics (
         id SERIAL PRIMARY KEY,
@@ -423,35 +484,27 @@ app.post("/admin/migrate", async (req, res) => {
     await safeQuery(createLeagueCacheTable);
     await safeQuery(createAnalyticsTable);
 
-    // *** ADD MISSING COLUMNS SECTION ***
+    // Add missing columns
     console.log('Adding missing columns...');
     
-    // Add missing columns to existing tables
     const addColumnStatements = [
-      // Players table missing columns
       "ALTER TABLE players ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
       "ALTER TABLE players ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-      
-      // My_roster table missing columns
       "ALTER TABLE my_roster ADD COLUMN IF NOT EXISTS added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
       "ALTER TABLE my_roster ADD COLUMN IF NOT EXISTS notes TEXT",
-      
-      // Watchlist table missing columns  
       "ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
       "ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
     ];
 
-    // Execute each ALTER TABLE statement
     for (const statement of addColumnStatements) {
       try {
         await safeQuery(statement);
         console.log(`✅ Executed: ${statement}`);
       } catch (error) {
-        console.log(`⚠️ Skipped (likely already exists): ${statement} - ${error.message}`);
+        console.log(`⚠️ Skipped: ${statement} - ${error.message}`);
       }
     }
 
-    // Create indexes for better performance
     const createIndexes = [
       "CREATE INDEX IF NOT EXISTS idx_players_espn_id ON players(espn_id)",
       "CREATE INDEX IF NOT EXISTS idx_players_position ON players(position)",
@@ -469,7 +522,6 @@ app.post("/admin/migrate", async (req, res) => {
       }
     }
 
-    // Check final column state
     const finalColumns = await safeQuery(checkColumnsQuery);
     console.log('Final columns after migration:', finalColumns.rows);
 
@@ -490,21 +542,19 @@ app.post("/admin/migrate", async (req, res) => {
   }
 });
 
-// Watchlist endpoints
+// Watchlist endpoints (keep your working ones)
 app.get("/api/watchlist", async (req, res) => {
   if (!pool) {
     return res.json({ watchlist: [], message: 'Database not available' });
   }
 
   try {
-    // Try the query with created_at first
     let { rows } = await safeQuery(
       'SELECT w.*, p.name, p.position, p.team FROM watchlist w JOIN players p ON p.id = w.player_id ORDER BY w.created_at DESC'
     );
     res.json({ watchlist: rows });
   } catch (error) {
     if (error?.code === '42703') {
-      // Column doesn't exist, try without created_at
       console.warn('[WARN] created_at column missing, using fallback query');
       try {
         const { rows } = await safeQuery(
@@ -562,14 +612,13 @@ app.delete("/api/watchlist/:id", async (req, res) => {
   }
 });
 
-// Roster endpoints
+// Roster endpoints (keep your working ones)
 app.get("/api/roster", async (_req, res) => {
   if (!pool) {
     return res.json({ roster: [], message: 'Database not available' });
   }
 
   try {
-    // Try with added_date first
     const { rows } = await safeQuery(`
       SELECT
         r.id,
@@ -601,7 +650,6 @@ app.get("/api/roster", async (_req, res) => {
     return res.json({ roster: rows });
   } catch (error) {
     if (error?.code === '42703') {
-      // Column doesn't exist, try without added_date
       console.warn('[WARN] added_date column missing, using fallback query');
       try {
         const { rows } = await safeQuery(`
@@ -620,14 +668,8 @@ app.get("/api/roster", async (_req, res) => {
           JOIN players p ON p.id = r.player_id
           ORDER BY
             CASE r.position_slot
-              WHEN 'QB' THEN 1
-              WHEN 'RB' THEN 2
-              WHEN 'WR' THEN 3
-              WHEN 'TE' THEN 4
-              WHEN 'FLEX' THEN 5
-              WHEN 'D/ST' THEN 6
-              WHEN 'K' THEN 7
-              WHEN 'BENCH' THEN 8
+              WHEN 'QB' THEN 1 WHEN 'RB' THEN 2 WHEN 'WR' THEN 3 WHEN 'TE' THEN 4
+              WHEN 'FLEX' THEN 5 WHEN 'D/ST' THEN 6 WHEN 'K' THEN 7 WHEN 'BENCH' THEN 8
               ELSE 9
             END;
         `);
@@ -714,137 +756,6 @@ app.post("/api/players", async (req, res) => {
   }
 });
 
-// Bulk player upsert (ingester)
-app.post("/api/players/bulk", async (req, res) => {
-  try {
-    if (!pool) {
-      return res.status(500).json({ error: 'Database not available' });
-    }
-
-    const { players } = req.body;
-
-    if (!Array.isArray(players) || players.length === 0) {
-      return res.status(400).json({ error: 'Players array is required' });
-    }
-
-    const client = await pool.connect();
-    
-    try {
-      await client.query('BEGIN');
-      
-      for (const player of players) {
-        const { espn_id, name, position, team, bye_week, status } = player;
-        
-        const query = `
-          INSERT INTO players (espn_id, name, position, team, bye_week, status)
-          VALUES ($1, $2, $3, $4, $5, $6)
-          ON CONFLICT (espn_id) 
-          DO UPDATE SET 
-            name = EXCLUDED.name,
-            position = EXCLUDED.position,
-            team = EXCLUDED.team,
-            bye_week = EXCLUDED.bye_week,
-            status = EXCLUDED.status,
-            updated_at = CURRENT_TIMESTAMP;
-        `;
-        
-        await client.query(query, [espn_id, name, position, team, bye_week, status]);
-      }
-      
-      await client.query('COMMIT');
-      res.json({ success: true, inserted: players.length });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Error bulk inserting players:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ESPN API endpoints (legacy - kept for backwards compatibility)
-app.get("/api/espn/league", async (req, res) => {
-  try {
-    const { season, leagueId, view } = req.query;
-    const v = view || "mTeam,mRoster,mSettings,mNav";
-    const url = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leagues/${leagueId}?view=${encodeURIComponent(v)}`;
-    const data = await espnFetch(url);
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/espn/leagueHistory", async (req, res) => {
-  try {
-    const { season, leagueId, view } = req.query;
-    const v = view || "mTeam,mRoster,mSettings";
-    const url = `https://fantasy.espn.com/apis/v3/games/ffl/leagueHistory/${leagueId}?seasonId=${season}&view=${encodeURIComponent(v)}`;
-    const data = await espnFetch(url);
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/espn/players", async (req, res) => {
-  try {
-    const { season, filter } = req.body;
-    const base = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/players?view=players_wl`;
-    const data = await espnFetch(base, { filter });
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/espn/playerInfo", async (req, res) => {
-  try {
-    const { season, pprId = 0, filter } = req.body;
-    const base = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/segments/0/leaguedefaults/${pprId}?view=kona_player_info`;
-    const data = await espnFetch(base, { filter });
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/espn/byeWeeks", async (req, res) => {
-  try {
-    const { season } = req.query;
-    const url = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/${season}?view=proTeamSchedules_wl`;
-    const data = await espnFetch(url);
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/espn/news", async (req, res) => {
-  try {
-    const { playerId, limit = 10 } = req.query;
-    const url = `https://site.api.espn.com/apis/fantasy/v2/games/ffl/news/players?playerId=${playerId}&limit=${limit}`;
-    const data = await espnFetch(url);
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Test ESPN connection
-app.get("/api/espn/test", async (req, res) => {
-  try {
-    const url = `https://fantasy.espn.com/apis/v3/games/ffl/seasons/2024?view=proTeamSchedules_wl`;
-    const data = await espnFetch(url);
-    res.json({ status: 'ok', dataSize: JSON.stringify(data).length });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // Global error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
@@ -869,21 +780,18 @@ app.use('*', (req, res) => {
       'GET /',
       'GET /api',
       'GET /api/health',
-      'GET /api/espn/test', 
-      'POST /api/espn/players',
+      'GET /api/espn/python/test',
+      'GET /api/espn/python/league/:leagueId',
+      'GET /api/espn/python/freeagents/:leagueId',
       'GET /api/roster',
       'GET /api/watchlist',
       'POST /api/players',
-      'POST /admin/migrate',
-      'GET /api/ffscrapr/test',
-      'GET /api/ffscrapr/league/:leagueId',
-      'GET /api/ffscrapr/freeagents/:leagueId',
-      'GET /api/ffscrapr/players/:leagueId'
+      'POST /admin/migrate'
     ]
   });
 });
 
-// Add process error handlers
+// Process error handlers
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -897,6 +805,5 @@ const PORT = process.env.PORT || 8081;
 app.listen(PORT, () => {
   console.log(`Fantasy proxy running on ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
-  console.log(`ESPN test: http://localhost:${PORT}/api/espn/test`);
-  console.log(`FFscrapr test: http://localhost:${PORT}/api/ffscrapr/test`);
+  console.log(`Python ESPN test: http://localhost:${PORT}/api/espn/python/test`);
 });
