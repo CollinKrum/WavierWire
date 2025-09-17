@@ -6,13 +6,14 @@ const API = import.meta.env.VITE_API_BASE || "";
 export default function EnhancedFantasyApp() {
   // Existing state
   const [season, setSeason] = useState(new Date().getFullYear());
-  const [leagueId, setLeagueId] = useState("");
   const [slot, setSlot] = useState(2);
+  const [searchPosition, setSearchPosition] = useState("ALL");
+  const [teamFilter, setTeamFilter] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [loadingCount, setLoadingCount] = useState(0);
+  const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState(null);
-  const [league, setLeague] = useState(null);
-  const [freeAgents, setFreeAgents] = useState([]);
-  const [byeWeeks, setByeWeeks] = useState(null);
+  const [players, setPlayers] = useState([]);
 
   // New state for advanced features
   const [activeTab, setActiveTab] = useState('basic');
@@ -28,6 +29,10 @@ export default function EnhancedFantasyApp() {
     const map = { 0: "QB", 2: "RB", 4: "WR", 6: "TE", 16: "D/ST", 17: "K" };
     return map[slot] || `Slot ${slot}`;
   }, [slot]);
+
+  const searchPositionLabel = useMemo(() => {
+    return searchPosition === "ALL" ? "all players" : searchPosition;
+  }, [searchPosition]);
 
   // Existing helper functions
   function startRequest() {
@@ -63,51 +68,43 @@ export default function EnhancedFantasyApp() {
   }
 
   // Existing functions
-  function fetchLeague() {
-    withRequest(
-      () => fetchJson(`${API}/api/espn/league?season=${season}&leagueId=${leagueId}`),
-      (data) => setLeague(data)
-    );
-  }
+  function fetchPlayers() {
+    const params = new URLSearchParams();
+    if (searchPosition && searchPosition !== "ALL") {
+      params.set("position", searchPosition);
+    }
+    if (teamFilter.trim()) {
+      params.set("team", teamFilter.trim());
+    }
+    if (searchQuery.trim()) {
+      params.set("q", searchQuery.trim());
+    }
 
-  function fetchByeWeeks() {
-    withRequest(
-      () => fetchJson(`${API}/api/espn/byeWeeks?season=${season}`),
-      (data) => setByeWeeks(data)
-    );
-  }
-
-  function fetchFreeAgents() {
-    const filter = {
-      players: {
-        filterStatus: { value: ["FREEAGENT", "WAIVERS"] },
-        filterSlotIds: { value: [Number(slot)] },
-        sortPercOwned: { sortPriority: 1, sortAsc: false },
-        limit: 100,
-        offset: 0
-      }
-    };
+    const url = `${API}/api/players${params.toString() ? `?${params.toString()}` : ""}`;
+    setHasSearched(true);
 
     withRequest(
-      () =>
-        fetchJson(`${API}/api/espn/players`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ season, filter })
-        }),
-      (json) => setFreeAgents(json?.players || json || [])
+      () => fetchJson(url),
+      (json) => setPlayers(json?.players || [])
     );
   }
 
   // New functions for advanced features
   function handleWaiverAnalysis() {
-    const position = positionLabel;
     runAnalysis([]);
   }
 
+  function handleAddToRoster(player) {
+    const playerId = player.id || player.player_id;
+    if (!playerId) return;
+
+    const slotName = (player.position || 'BENCH').toUpperCase();
+    addPlayer(playerId, slotName);
+  }
+
   function handleAddToWatchlist(player) {
-    const playerId = player.id || player.espn_id;
-    addToWatchlist(playerId, 3, `Added from ${positionLabel} search`);
+    const playerId = player.id || player.player_id || player.espn_id;
+    addToWatchlist(playerId, 3, `Added from ${searchPositionLabel}`);
   }
 
   const loading = loadingCount > 0;
@@ -159,120 +156,117 @@ export default function EnhancedFantasyApp() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-2">Season</label>
-                  <input 
-                    type="number" 
-                    value={season} 
+                  <input
+                    type="number"
+                    value={season}
                     onChange={(e) => setSeason(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-slate-700 border border-slate-600 text-white rounded-md"
                   />
+                  <p className="text-xs text-gray-400 mt-1">Season is retained for future API-driven features.</p>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">League ID</label>
-                  <input 
-                    type="text" 
-                    value={leagueId} 
-                    onChange={(e) => setLeagueId(e.target.value)}
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Position</label>
+                  <select
+                    value={searchPosition}
+                    onChange={(e) => setSearchPosition(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-700 border border-slate-600 text-white rounded-md"
+                  >
+                    <option value="ALL">All Positions</option>
+                    <option value="QB">QB</option>
+                    <option value="RB">RB</option>
+                    <option value="WR">WR</option>
+                    <option value="TE">TE</option>
+                    <option value="K">K</option>
+                    <option value="D/ST">D/ST</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Team</label>
+                  <input
+                    type="text"
+                    value={teamFilter}
+                    onChange={(e) => setTeamFilter(e.target.value)}
+                    placeholder="e.g. SF"
                     className="w-full px-3 py-2 bg-slate-700 border border-slate-600 text-white rounded-md"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Position</label>
-                  <select 
-                    value={slot} 
-                    onChange={(e) => setSlot(Number(e.target.value))}
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Search</label>
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Player name"
                     className="w-full px-3 py-2 bg-slate-700 border border-slate-600 text-white rounded-md"
-                  >
-                    <option value={0}>QB</option>
-                    <option value={2}>RB</option>
-                    <option value={4}>WR</option>
-                    <option value={6}>TE</option>
-                    <option value={17}>K</option>
-                    <option value={16}>D/ST</option>
-                  </select>
+                  />
                 </div>
               </div>
 
               <div className="flex flex-wrap gap-3 mb-6">
-                <button 
-                  onClick={fetchLeague} 
-                  disabled={!leagueId || loading}
-                  className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white rounded-md font-medium"
-                >
-                  📋 Load League
-                </button>
-                <button 
-                  onClick={fetchByeWeeks} 
-                  disabled={loading}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white rounded-md font-medium"
-                >
-                  📅 Load Bye Weeks
-                </button>
-                <button 
-                  onClick={fetchFreeAgents} 
+                <button
+                  onClick={fetchPlayers}
                   disabled={loading}
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white rounded-md font-medium"
                 >
-                  🔍 Find {positionLabel} FAs
+                  🔍 Search {searchPositionLabel}
                 </button>
               </div>
 
               {loading && <div className="text-blue-400 mb-4">🔄 Loading...</div>}
             </div>
 
-            {/* Results sections (league, bye weeks, free agents) */}
-            {league && (
-              <div className="bg-slate-800 rounded-lg p-6 border border-slate-700">
-                <h3 className="text-xl font-semibold text-white mb-4">📋 League Info</h3>
-                <div className="bg-slate-900 rounded p-4 font-mono text-sm text-gray-300">
-                  <pre>{JSON.stringify({
-                    name: league.settings?.name,
-                    scoringPeriodId: league.scoringPeriodId,
-                    teams: (league.teams || []).length
-                  }, null, 2)}</pre>
-                </div>
-              </div>
-            )}
-
-            {!!freeAgents?.length && (
+            {!!players?.length && (
               <div className="bg-slate-800 rounded-lg p-6 border border-slate-700">
                 <h3 className="text-xl font-semibold text-white mb-4">
-                  🎯 Top {positionLabel} Free Agents
+                  📚 Player Database Results
                 </h3>
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead>
                       <tr className="border-b border-slate-600">
                         <th className="text-left py-2 text-gray-300">Player</th>
+                        <th className="text-left py-2 text-gray-300">Position</th>
                         <th className="text-left py-2 text-gray-300">Team</th>
-                        <th className="text-center py-2 text-gray-300">% Owned</th>
+                        <th className="text-center py-2 text-gray-300">Bye</th>
+                        <th className="text-center py-2 text-gray-300">Status</th>
                         <th className="text-left py-2 text-gray-300">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {freeAgents.slice(0, 15).map((p, i) => (
-                        <tr key={p.id || i} className="border-b border-slate-700 hover:bg-slate-700">
-                          <td className="py-3 text-white font-medium">
-                            {p?.fullName || p?.player?.fullName}
-                          </td>
-                          <td className="py-3 text-gray-300">
-                            {p?.proTeamAbbreviation || p?.player?.proTeamAbbreviation}
-                          </td>
-                          <td className="py-3 text-center text-gray-300">
-                            {(p?.ownership?.percentOwned ?? p?.percentOwned ?? 0).toFixed?.(1) ?? ""}%
-                          </td>
+                      {players.slice(0, 50).map((p) => (
+                        <tr key={p.id} className="border-b border-slate-700 hover:bg-slate-700">
+                          <td className="py-3 text-white font-medium">{p.name}</td>
+                          <td className="py-3 text-gray-300">{p.position || "-"}</td>
+                          <td className="py-3 text-gray-300">{p.team || "-"}</td>
+                          <td className="py-3 text-center text-gray-300">{p.bye_week ?? "-"}</td>
+                          <td className="py-3 text-center text-gray-300 capitalize">{p.status || "active"}</td>
                           <td className="py-3">
-                            <button
-                              onClick={() => handleAddToWatchlist(p)}
-                              className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-sm rounded"
-                            >
-                              👀 Watch
-                            </button>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => handleAddToRoster(p)}
+                                className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-sm rounded"
+                              >
+                                ➕ Roster
+                              </button>
+                              <button
+                                onClick={() => handleAddToWatchlist(p)}
+                                className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-sm rounded"
+                              >
+                                👀 Watch
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+              </div>
+            )}
+
+            {hasSearched && !loading && !players.length && (
+              <div className="bg-slate-800 rounded-lg p-6 border border-slate-700 text-gray-300 text-center">
+                No players matched your filters. Try adjusting the position, team, or search term.
               </div>
             )}
           </div>
