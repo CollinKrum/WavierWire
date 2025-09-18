@@ -4,6 +4,7 @@ import fetch from "node-fetch";
 import cors from "cors";
 import { spawn } from 'child_process';
 import pg from "pg";
+import dotenv from 'dotenv';
 const { Pool } = pg;
 
 dotenv.config();
