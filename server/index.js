@@ -3,7 +3,7 @@ import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import { spawn } from 'child_process';
-import pkg from pg;
+import pg from pg;
 const { Pool } = pg;
 
 const app = express();
