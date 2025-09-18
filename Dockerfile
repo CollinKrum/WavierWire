@@ -12,8 +12,9 @@ RUN pip3 install espn-api
 # Set working directory
 WORKDIR /app
 
-# Copy package files and install Node dependencies
-COPY server/package*.json ./
+# Copy and install server dependencies
+COPY server/package*.json ./server/
+WORKDIR /app/server
 RUN npm install
 
 # Copy server code
