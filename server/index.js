@@ -3,9 +3,10 @@ import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import { spawn } from 'child_process';
-import pg from pg;
+import pg from "pg";
 const { Pool } = pg;
 
+dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
